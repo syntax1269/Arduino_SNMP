@@ -14,10 +14,10 @@
 // #define ASSERT_CALLBACK_SETTABLE if(!(static_cast<ValueCallback*>(this)->isSettable)) return SETTING_NON_SETTABLE_ERROR;
 #define ASSERT_CALLBACK_SETTABLE()
 
-ValueCallback* ValueCallback::findCallback(std::deque<ValueCallback*> &callbacks, const OIDType* const oid, bool walk, size_t startAt, size_t *foundAt){
+ValueCallback* ValueCallback::findCallback(ValueCallback* const *callbacks, int callbacksCount, const OIDType* const oid, bool walk, int startAt, int *foundAt){
     bool useNext = false;
 
-    for(size_t i = startAt; i < callbacks.size(); i++){
+    for(int i = startAt; i < callbacksCount; i++){
         auto callback = callbacks[i];
 
         if(useNext){
@@ -39,7 +39,6 @@ ValueCallback* ValueCallback::findCallback(std::deque<ValueCallback*> &callbacks
         }
 
         if(walk && callback->OID->isSubTreeOf(oid)){
-            // If the oid passed in is a substring of our current callback, and it begins at the start
             if(foundAt){
                 *foundAt = i;
             }
@@ -50,13 +49,13 @@ ValueCallback* ValueCallback::findCallback(std::deque<ValueCallback*> &callbacks
 }
 
 std::shared_ptr<BER_CONTAINER> ValueCallback::getValueForCallback(ValueCallback* callback){
-    SNMP_LOGD("Getting value for callback of OID: %s, type: %d\n", callback->OID->string().c_str(), callback->type);
+    SNMP_LOGD("Getting value for callback of OID: %s, type: %d\n", callback->OID->string(), callback->type);
     auto value = callback->buildTypeWithValue();
     return value;
 }
 
 SNMP_ERROR_STATUS ValueCallback::setValueForCallback(ValueCallback* callback, const std::shared_ptr<BER_CONTAINER> &value){
-    SNMP_LOGD("Setting value for callback of OID: %s\n", callback->OID->string().c_str());
+    SNMP_LOGD("Setting value for callback of OID: %s\n", callback->OID->string());
 
     if(!callback->isSettable){
         return SETTING_NON_SETTABLE_ERROR;
@@ -123,8 +122,8 @@ SNMP_ERROR_STATUS StringCallback::setTypeWithValue(BER_CONTAINER* rawValue){
     ASSERT_VALID_SETTABLE_VALUE(this->value);
 
     OctetType* val = static_cast<OctetType*>(rawValue);
-    if(val->_value.length() >= this->max_len) return WRONG_LENGTH;
-    strncpy(*this->value, val->_value.data(), this->max_len);
+    if(val->_valueLen >= this->max_len) return WRONG_LENGTH;
+    strncpy(*this->value, val->_value, this->max_len);
 
     return NO_ERROR;
 }
@@ -205,53 +204,51 @@ SNMP_ERROR_STATUS Counter64Callback::setTypeWithValue(BER_CONTAINER* rawValue){
     return NO_ERROR;
 }
 
-bool SortableOIDType::sort_oids(SortableOIDType* oid1, SortableOIDType* oid2){ // returns true if oid1 EARLIER than oid2
-    const auto& map1 = oid1->sortingMap;
-    const auto& map2 = oid2->sortingMap;
+bool SortableOIDType::sort_oids(SortableOIDType* oid1, SortableOIDType* oid2){
+    const uint32_t* map1 = oid1->sortingMap;
+    const uint32_t* map2 = oid2->sortingMap;
+    int len1 = oid1->sortingMapLen;
+    int len2 = oid2->sortingMapLen;
 
-    if(map1.empty()) return false;
-    if(map2.empty()) return true;
+    if(len1 == 0) return false;
+    if(len2 == 0) return true;
 
-    int i;
-
-    if(map1.size() < map2.size()){
-        i = map1.size();
-    } else {
-        i = map2.size();
-    }
+    int i = (len1 < len2) ? len1 : len2;
 
     for(int j = 0; j < i; j++){
-        if(map1[j] != map2[j]){ // if they're the same then we're on same level
+        if(map1[j] != map2[j]){
             return map1[j] < map2[j];
         }
     }
 
-    return map1.size() < map2.size();
+    return len1 < len2;
 }
 
 bool compare_callbacks (const ValueCallback* first, const ValueCallback* second){
     return SortableOIDType::sort_oids(first->OID, second->OID);
 }
 
-void sort_handlers(std::deque<ValueCallback*>& callbacks){
-    std::sort(callbacks.begin(), callbacks.end(), compare_callbacks);
+void sort_handlers(ValueCallback** callbacks, int callbacksCount){
+    if(callbacksCount <= 1) return;
+    std::sort(callbacks, callbacks + callbacksCount, compare_callbacks);
 }
 
-bool remove_handler(std::deque<ValueCallback*>& callbacks, ValueCallback* callback){
+bool remove_handler(ValueCallback** callbacks, int& callbacksCount, ValueCallback* callback){
     int i = 0;
     int found = -1;
-    for(auto cb : callbacks){
-        if(cb == callback){
+    for(i = 0; i < callbacksCount; i++){
+        if(callbacks[i] == callback){
             found = i;
             break;
         }
-        i++;
     }
 
     if(found > -1){
-        auto it = callbacks.begin();
-        std::advance(it, found);
-        callbacks.erase(it);
+        for(int j = found; j < callbacksCount - 1; j++){
+            callbacks[j] = callbacks[j + 1];
+        }
+        callbacks[callbacksCount - 1] = nullptr;
+        callbacksCount--;
         return true;
     } else {
         return false;
