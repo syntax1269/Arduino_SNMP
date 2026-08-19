@@ -70,6 +70,8 @@ jobs:
           arduino-cli core update-index
       - name: Install platform core
         run: arduino-cli core install ${{ matrix.platform }}
+      - name: Install example-library deps (ArduinoJson — used by SNMP_Sensor)
+        run: arduino-cli lib install "ArduinoJson"
       - name: Install library (self, by path)
         run: arduino-cli lib install --no-deps --git-url . || true
       - name: Compile sketch ${{ matrix.example }} for ${{ matrix.fqbn }}
