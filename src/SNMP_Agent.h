@@ -26,45 +26,59 @@
 #include "include/defs.h"
 #include "include/SNMPInform.h"
 
-#include <list>
-#include <deque>
-#include <string>
-
 class SNMPAgent {
     public:
         SNMPAgent(){
-            SNMPAgent::agents.push_back(this);
+            SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
         };
 
-        SNMPAgent(const char* community): _community(community){
-            SNMPAgent::agents.push_back(this);
+        SNMPAgent(const char* community){
+            size_t len = strlen(community);
+            if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
+            memcpy(_community, community, len);
+            _community[len] = 0;
+            SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
         };
 
-        SNMPAgent(const char* readOnlyCommunity, const char* readWriteCommunity): _community(readWriteCommunity), _readOnlyCommunity(readOnlyCommunity){
-            SNMPAgent::agents.push_back(this);
+        SNMPAgent(const char* readOnlyCommunity, const char* readWriteCommunity){
+            size_t len = strlen(readWriteCommunity);
+            if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
+            memcpy(_community, readWriteCommunity, len);
+            _community[len] = 0;
+            len = strlen(readOnlyCommunity);
+            if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
+            memcpy(_readOnlyCommunity, readOnlyCommunity, len);
+            _readOnlyCommunity[len] = 0;
+            SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
         }
 
-        void setReadOnlyCommunity(const std::string& community){
-            this->_readOnlyCommunity = community;
+        void setReadOnlyCommunity(const char* community){
+            size_t len = strlen(community);
+            if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
+            memcpy(this->_readOnlyCommunity, community, len);
+            this->_readOnlyCommunity[len] = 0;
         }
 
-        void setReadWriteCommunity(const std::string& community){
-            this->_community = community;
+        void setReadWriteCommunity(const char* community){
+            size_t len = strlen(community);
+            if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
+            memcpy(this->_community, community, len);
+            this->_community[len] = 0;
         }
 
-        std::string _community = "public";
-        std::string _readOnlyCommunity;
-        
+        char _community[SNMP_MAX_COMMUNITY_LEN + 1] = "public";
+        char _readOnlyCommunity[SNMP_MAX_COMMUNITY_LEN + 1] = {0};
+
         ValueCallback* addIntegerHandler(const char *oid, int* value, bool isSettable = false, bool overwritePrefix = false);
         ValueCallback* addReadOnlyIntegerHandler(const char *oid, int value, bool overwritePrefix = false);
         ValueCallback* addDynamicIntegerHandler(const char *oid, GETINT_FUNC callback_func, bool overwritePrefix = false);
         ValueCallback* addReadWriteStringHandler(const char *oid, char** value, size_t max_len = 0, bool isSettable = false, bool overwritePrefix = false);
-        ValueCallback* addReadOnlyStaticStringHandler(const char *oid, const std::string& value, bool overwritePrefix = false);
+        ValueCallback* addReadOnlyStaticStringHandler(const char *oid, const char* value, bool overwritePrefix = false);
         ValueCallback* addDynamicReadOnlyStringHandler(const char *oid, GETSTRING_FUNC callback_func, bool overwritePrefix = false);
         ValueCallback* addOpaqueHandler(const char *oid, uint8_t* value, size_t data_len, bool isSettable = false, bool overwritePrefix = false);
         ValueCallback* addTimestampHandler(const char *oid, uint32_t* value, bool isSettable = false, bool overwritePrefix = false);
         ValueCallback* addDynamicReadOnlyTimestampHandler(const char *oid, GETUINT_FUNC callback_func, bool overwritePrefix = false);
-        ValueCallback* addOIDHandler(const char *oid, const std::string& value, bool overwritePrefix = false);
+        ValueCallback* addOIDHandler(const char *oid, const char* value, bool overwritePrefix = false);
         ValueCallback* addCounter64Handler(const char *oid, uint64_t* value, bool overwritePrefix = false);
         ValueCallback* addCounter32Handler(const char *oid, uint32_t* value, bool overwritePrefix = false);
         ValueCallback* addGaugeHandler(const char *oid, uint32_t* value, bool overwritePrefix = false);
@@ -83,12 +97,12 @@ class SNMPAgent {
         begin(const char* oidPrefix);
         void stop();
 	    enum SNMP_ERROR_RESPONSE loop();
-        
+
         short AgentUDPport = 161;
         void setUDPport(short port){
 	        AgentUDPport = port;
         }
-        
+
         bool setOccurred = false;
         void resetSetOccurred(){
             setOccurred = false;
@@ -99,23 +113,28 @@ class SNMPAgent {
 
         snmp_request_id_t sendTrapTo(SNMPTrap* trap, const IPAddress& ip, bool replaceQueuedRequests = true, int retries = 0, int delay_ms = 30000);
         static void markTrapDeleted(SNMPTrap* trap);
-        
+
     private:
-        std::deque<ValueCallback*> callbacks;
+        ValueCallback* callbacks[SNMP_MAX_CALLBACKS_PER_AGENT] = {nullptr};
+        int callbacksCount = 0;
         ValueCallback* addHandler(ValueCallback *callback, bool isSettable);
-        
+
         static void informCallback(void*, snmp_request_id_t, bool);
         void handleInformQueue();
 
-        std::list<UDP*> _udp;
+        UDP* _udp[SNMP_MAX_UDP_PER_AGENT] = {nullptr};
+        int udpCount = 0;
 
-        std::string oidPrefix;
+        char oidPrefix[SNMP_MAX_OID_STR_LEN + 1] = {0};
         uint8_t _packetBuffer[MAX_SNMP_PACKET_LENGTH] = {0};
 
         SortableOIDType* buildOIDWithPrefix(const char *oid, bool overwritePrefix);
 
-        static std::list<SNMPAgent*> agents;
-        std::list<struct InformItem*> informList;
+        static SNMPAgent* agents[SNMP_MAX_AGENTS];
+        static int agentsCount;
+
+        struct InformItem* informList[SNMP_MAX_TRAPS_INFLIGHT] = {nullptr};
+        int informCount = 0;
 };
 
 #endif

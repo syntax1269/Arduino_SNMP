@@ -2,18 +2,17 @@
 #define VALUE_CALLBACKS_h
 
 #include "BER.h"
-#include <deque>
 #include <algorithm>
 
 typedef int (*GETINT_FUNC)() ;
 typedef uint32_t (*GETUINT_FUNC)();
-typedef const std::string (*GETSTRING_FUNC)();
+typedef const char* (*GETSTRING_FUNC)();
 
 class ValueCallback {
   public:
     ValueCallback(SortableOIDType* oid, ASN_TYPE type): OID(oid), type(type){};
     ~ValueCallback(){
-        delete OID;
+        asn_delete(OID);
     }
     SortableOIDType * const OID;
 
@@ -26,7 +25,7 @@ class ValueCallback {
         setOccurred = false;
     }
 
-    static ValueCallback* findCallback(std::deque<ValueCallback*> &callbacks, const OIDType* const oid, bool walk, size_t startAt = 0, size_t *foundAt = nullptr);
+    static ValueCallback* findCallback(ValueCallback* const *callbacks, int callbacksCount, const OIDType* const oid, bool walk, int startAt = 0, int *foundAt = nullptr);
     static std::shared_ptr<BER_CONTAINER> getValueForCallback(ValueCallback* callback);
     static SNMP_ERROR_STATUS setValueForCallback(ValueCallback* callback, const std::shared_ptr<BER_CONTAINER> &value);
 
@@ -36,8 +35,8 @@ protected:
 };
 
 bool compare_callbacks (const ValueCallback* first, const ValueCallback* second);
-void sort_handlers(std::deque<ValueCallback*>&);
-bool remove_handler(std::deque<ValueCallback*>&, ValueCallback*);
+void sort_handlers(ValueCallback** callbacks, int callbacksCount);
+bool remove_handler(ValueCallback** callbacks, int& callbacksCount, ValueCallback*);
 
 class IntegerCallback: public ValueCallback {
   public:
@@ -114,10 +113,15 @@ protected:
 
 class ReadOnlyStringCallback: public ValueCallback {
 public:
-    ReadOnlyStringCallback(SortableOIDType* oid, const std::string &value): ValueCallback(oid, STRING), value(value) {};
+    ReadOnlyStringCallback(SortableOIDType* oid, const char *value): ValueCallback(oid, STRING) {
+        size_t len = strlen(value);
+        if(len > SNMP_MAX_STRING_LEN) len = SNMP_MAX_STRING_LEN;
+        memcpy(this->value, value, len);
+        this->value[len] = 0;
+    };
 
 protected:
-    std::string value;
+    char value[SNMP_MAX_STRING_LEN + 1];
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override;
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
@@ -166,10 +170,15 @@ class OpaqueCallback: public ValueCallback {
 
 class OIDCallback: public ValueCallback {
   public:
-    OIDCallback(SortableOIDType* oid, const std::string &value): ValueCallback(oid, ASN_TYPE::OID), value(value) {};
+    OIDCallback(SortableOIDType* oid, const char *value): ValueCallback(oid, ASN_TYPE::OID) {
+        size_t len = strlen(value);
+        if(len > SNMP_MAX_OID_STR_LEN) len = SNMP_MAX_OID_STR_LEN;
+        memcpy(this->value, value, len);
+        this->value[len] = 0;
+    };
 
   protected:
-    std::string const value;
+    char value[SNMP_MAX_OID_STR_LEN + 1];
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override;
     SNMP_ERROR_STATUS setTypeWithValue (BER_CONTAINER*) override{

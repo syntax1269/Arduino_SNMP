@@ -4,10 +4,61 @@
     #include <WiFi.h> // ESP32 Core WiFi Library
 #endif
 
+/* -------------------------------------------------------------------------- *
+ * COMPILE-TIME TUNING (optional, BEFORE #include <SNMP_Agent.h>)
+ *
+ *   SNMP v3.1.3+ auto-tunes itself for ESP8266: on ESP8266 the library
+ *   activates a "_SNMP_ESP8266_TINY" profile that shrinks all static pool
+ *   sizes so that WiFi + LittleFS + ArduinoJson + SNMP fit into 80 KB DRAM
+ *   with headroom (~ -28 KB BSS vs the generic defaults).  This sketch
+ *   registers 34 OID callbacks, well within the ESP8266 profile budget of
+ *   24 callbacks + 24 ASN pool slots + 8 VarBind slots.
+ *
+ *   All SNMP size constants live in src/include/defs.h and are wrapped with
+ *   `#ifndef ... #endif`.  To OVERRIDE library or auto-tune values from
+ *   your sketch, put a #define HERE (before SNMP_Agent.h).  Examples:
+ *
+ *       // Reclaim capacity on bigger ESP8266 modules or ESP32 sketches:
+ *       #define SNMP_MAX_CALLBACKS_PER_AGENT   64
+ *       #define SNMP_POOL_ASN_OBJECTS          32
+ *       #define SNMP_MAX_VARBINDS               16
+ *       #define SNMP_MAX_COMPLEX_CHILDREN       16
+ *
+ *       // Opt OUT of ESP8266 auto-tune entirely (use generic defaults):
+ *       #define SNMP_SKIP_ESP8266_AUTOTUNE      1
+ *
+ *       // Drop max OctetString/Opaque payload size further for tiny sensors:
+ *       #define OCTET_TYPE_MAX_LENGTH           128
+ *
+ *   Snapshot of the on-by-default ESP8266 auto-tune profile applied by
+ *   SNMP_Agent v3.1.3+ (NOT a sketch-side define, just shown for reference):
+ *       MAX_SNMP_PACKET_LENGTH                1024
+ *       OCTET_TYPE_MAX_LENGTH                  256
+ *       SNMP_MAX_OID_STR_LEN                   192
+ *       SNMP_MAX_COMPLEX_CHILDREN                8
+ *       SNMP_MAX_VARBINDS                        6
+ *       SNMP_MAX_CALLBACKS_PER_AGENT            24
+ *       SNMP_MAX_TRAPS_INFLIGHT                  4
+ *       SNMP_MAX_CALLBACKS_PER_TRAP              8
+ *       SNMP_POOL_ASN_OBJECTS                   24
+ *       SNMP_POOL_VARBIND_OBJECTS                8
+ *       SNMP_POOL_SLOT_SIZE                    640
+ * -------------------------------------------------------------------------- */
+
 #include <WiFiUdp.h>
 #include <SNMP_Agent.h>
 
-#include <LITTLEFS.h>    // For storing and retreiving previous values or states (note: SPIFFS is deprecated and replaced by LittleFS)
+#include <LittleFS.h>
+#define FILESYSTEM LittleFS
+
+#if defined(ESP8266)
+    #define FS_BEGIN()    FILESYSTEM.begin()
+    #define SNMP_RAND()   ((uint32_t)os_random())
+#elif defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+    #define FS_BEGIN()    FILESYSTEM.begin(FORMAT_LITTLEFS_IF_FAILED)
+    #define SNMP_RAND()   esp_random()
+#endif
+
 #include <ArduinoJson.h> // Saved data will be stored in JSON
 
 #define FORMAT_LITTLEFS_IF_FAILED true // Be careful, this will wipe all the data stored. So you may want to set this to false once used once.
@@ -26,88 +77,88 @@ const char* rocommunity = "public";  // Read only community string
 const char* rwcommunity = "private"; // Read Write community string for set commands
 
 // RFC1213-MIB (System)
-char* oidSysDescr = ".1.3.6.1.2.1.1.1.0";    // OctetString SysDescr
-char* oidSysObjectID = ".1.3.6.1.2.1.1.2.0"; // OctetString SysObjectID
-char* oidSysUptime = ".1.3.6.1.2.1.1.3.0";   // TimeTicks sysUptime (hundredths of seconds)
-char* oidSysContact = ".1.3.6.1.2.1.1.4.0";  // OctetString SysContact
-char* oidSysName = ".1.3.6.1.2.1.1.5.0";     // OctetString SysName
-char* oidSysLocation = ".1.3.6.1.2.1.1.6.0"; // OctetString SysLocation
-char* oidSysServices = ".1.3.6.1.2.1.1.7.0"; // Integer sysServices
+const char* oidSysDescr = ".1.3.6.1.2.1.1.1.0";    // OctetString SysDescr
+const char* oidSysObjectID = ".1.3.6.1.2.1.1.2.0"; // OctetString SysObjectID
+const char* oidSysUptime = ".1.3.6.1.2.1.1.3.0";   // TimeTicks sysUptime (hundredths of seconds)
+const char* oidSysContact = ".1.3.6.1.2.1.1.4.0";  // OctetString SysContact
+const char* oidSysName = ".1.3.6.1.2.1.1.5.0";     // OctetString SysName
+const char* oidSysLocation = ".1.3.6.1.2.1.1.6.0"; // OctetString SysLocation
+const char* oidSysServices = ".1.3.6.1.2.1.1.7.0"; // Integer sysServices
 
-std::string sysDescr = "SNMP Agent";
-std::string sysObjectID = "";
-int sysUptime = 0;
+char sysDescr[] = "SNMP Agent";
+char sysObjectID[] = "";
+uint32_t sysUptime = 0;
 char sysContactValue[255];
 char *sysContact = sysContactValue;
 char sysNameValue[255];
 char *sysName = sysNameValue;
 char sysLocationValue[255];
 char *sysLocation = sysLocationValue;
-int sysServices = 65; // Physical and Application
+int sysServices = 65;
 
 // ENTITY-MIB .1.3.6.1.2.1.47 - Needs to be implemented to support ENTITY-SENSOR-MIB
 // An entry would be required per sensor. This is index 1.
 
 // entityPhysicalTable
-char* oidentPhysicalIndex_1 = ".1.3.6.1.2.1.47.1.1.1.1.1.1";
-char* oidentPhysicalDescr_1 = ".1.3.6.1.2.1.47.1.1.1.1.2.1";
-char* oidentPhysicalVendorType_1 = ".1.3.6.1.2.1.47.1.1.1.1.3.1";
-char* oidentPhysicalContainedIn_1 = ".1.3.6.1.2.1.47.1.1.1.1.4.1";
-char* oidentPhysicalClass_1 = ".1.3.6.1.2.1.47.1.1.1.1.5.1";
-char* oidentPhysicalParentRelPos_1 = ".1.3.6.1.2.1.47.1.1.1.1.6.1";
-char* oidentPhysicalName_1 = ".1.3.6.1.2.1.47.1.1.1.1.7.1";
-char* oidentPhysicalHardwareRev_1 = ".1.3.6.1.2.1.47.1.1.1.1.8.1";
-char* oidentPhysicalFirmwareRev_1 = ".1.3.6.1.2.1.47.1.1.1.1.9.1";
-char* oidentPhysicalSoftwareRev_1 = ".1.3.6.1.2.1.47.1.1.1.1.10.1";
-char* oidentPhysicalSerialNum_1 = ".1.3.6.1.2.1.47.1.1.1.1.11.1";
-char* oidentPhysicalMfgName_1 = ".1.3.6.1.2.1.47.1.1.1.1.12.1";
-char* oidentPhysicalModelName_1 = ".1.3.6.1.2.1.47.1.1.1.1.13.1";
-char* oidentPhysicalAlias_1 = ".1.3.6.1.2.1.47.1.1.1.1.14.1";
-char* oidentPhysicalAssetID_1 = ".1.3.6.1.2.1.47.1.1.1.1.15.1";
-char* oidentPhysicalIsFRU_1 = ".1.3.6.1.2.1.47.1.1.1.1.16.1";
-char* oidentPhysicalMfgDate_1 = ".1.3.6.1.2.1.47.1.1.1.1.17.1";
-char* oidentPhysicalUris_1 = ".1.3.6.1.2.1.47.1.1.1.1.18.1";
+const char* oidentPhysicalIndex_1 = ".1.3.6.1.2.1.47.1.1.1.1.1.1";
+const char* oidentPhysicalDescr_1 = ".1.3.6.1.2.1.47.1.1.1.1.2.1";
+const char* oidentPhysicalVendorType_1 = ".1.3.6.1.2.1.47.1.1.1.1.3.1";
+const char* oidentPhysicalContainedIn_1 = ".1.3.6.1.2.1.47.1.1.1.1.4.1";
+const char* oidentPhysicalClass_1 = ".1.3.6.1.2.1.47.1.1.1.1.5.1";
+const char* oidentPhysicalParentRelPos_1 = ".1.3.6.1.2.1.47.1.1.1.1.6.1";
+const char* oidentPhysicalName_1 = ".1.3.6.1.2.1.47.1.1.1.1.7.1";
+const char* oidentPhysicalHardwareRev_1 = ".1.3.6.1.2.1.47.1.1.1.1.8.1";
+const char* oidentPhysicalFirmwareRev_1 = ".1.3.6.1.2.1.47.1.1.1.1.9.1";
+const char* oidentPhysicalSoftwareRev_1 = ".1.3.6.1.2.1.47.1.1.1.1.10.1";
+const char* oidentPhysicalSerialNum_1 = ".1.3.6.1.2.1.47.1.1.1.1.11.1";
+const char* oidentPhysicalMfgName_1 = ".1.3.6.1.2.1.47.1.1.1.1.12.1";
+const char* oidentPhysicalModelName_1 = ".1.3.6.1.2.1.47.1.1.1.1.13.1";
+const char* oidentPhysicalAlias_1 = ".1.3.6.1.2.1.47.1.1.1.1.14.1";
+const char* oidentPhysicalAssetID_1 = ".1.3.6.1.2.1.47.1.1.1.1.15.1";
+const char* oidentPhysicalIsFRU_1 = ".1.3.6.1.2.1.47.1.1.1.1.16.1";
+const char* oidentPhysicalMfgDate_1 = ".1.3.6.1.2.1.47.1.1.1.1.17.1";
+const char* oidentPhysicalUris_1 = ".1.3.6.1.2.1.47.1.1.1.1.18.1";
 
 int entPhysicalIndex_1 = 1;
-std::string entPhysicalDescr_1 = "Fake Temperature Sensor";
-std::string entPhysicalVendorType_1 = "";
+char entPhysicalDescr_1[] = "Fake Temperature Sensor";
+char entPhysicalVendorType_1[] = "";
 int entPhysicalContainedIn_1 = 0;
-int entPhysicalClass_1 = 8; // Sensor
+int entPhysicalClass_1 = 8;
 int entPhysicalParentRelPos_1 = -1;
-std::string entPhysicalName_1 = "";
-std::string entPhysicalHardwareRev_1 = "";
-std::string entPhysicalFirmwareRev_1 = "";
-std::string entPhysicalSoftwareRev_1 = "";
-std::string entPhysicalSerialNum_1 = "";
-std::string entPhysicalMfgName_1 = "";
-std::string entPhysicalModelName_11 = "";
-std::string entPhysicalAlias_1 = "";
-std::string entPhysicalAssetID_1 = "";
+char entPhysicalName_1[] = "";
+char entPhysicalHardwareRev_1[] = "";
+char entPhysicalFirmwareRev_1[] = "";
+char entPhysicalSoftwareRev_1[] = "";
+char entPhysicalSerialNum_1[] = "";
+char entPhysicalMfgName_1[] = "";
+char entPhysicalModelName_11[] = "";
+char entPhysicalAlias_1[] = "";
+char entPhysicalAssetID_1[] = "";
 int entPhysicalIsFRU_1 = 0;
-std::string entPhysicalMfgDate_1 = "'0000000000000000'H"; // Special value, not sure it's correct. Or meant to be a Hex string?
-std::string entPhysicalUris_1 = "";
+char entPhysicalMfgDate_1[] = "'0000000000000000'H";
+char entPhysicalUris_1[] = "";
 
 // EntityPhysicalGroup
 
 // ENTITY-SENSOR-MIB .1.3.6.1.2.1.99
 // An entry would be required per sensor. This is index 1.
 // Must match index in ENTITY-MIB
-char* oidentPhySensorType_1 = ".1.3.6.1.2.1.99.1.1.1.1.1";
-char* oidentPhySensorScale_1 = ".1.3.6.1.2.1.99.1.1.1.2.1";
-char* oidentPhySensorPrecision_1 = ".1.3.6.1.2.1.99.1.1.1.3.1";
-char* oidentPhySensorValue_1 = ".1.3.6.1.2.1.99.1.1.1.4.1";
-char* oidentPhySensorOperStatus_1 = ".1.3.6.1.2.1.99.1.1.1.5.1";
-char* oidentPhySensorUnitsDisplay_1 = ".1.3.6.1.2.1.99.1.1.1.6.1";
-char* oidentPhySensorValueTimeStamp_1 = ".1.3.6.1.2.1.99.1.1.1.7.1";
-char* oidentPhySensorValueUpdateRate_1 = ".1.3.6.1.2.1.99.1.1.1.8.1";
+const char* oidentPhySensorType_1 = ".1.3.6.1.2.1.99.1.1.1.1.1";
+const char* oidentPhySensorScale_1 = ".1.3.6.1.2.1.99.1.1.1.2.1";
+const char* oidentPhySensorPrecision_1 = ".1.3.6.1.2.1.99.1.1.1.3.1";
+const char* oidentPhySensorValue_1 = ".1.3.6.1.2.1.99.1.1.1.4.1";
+const char* oidentPhySensorOperStatus_1 = ".1.3.6.1.2.1.99.1.1.1.5.1";
+const char* oidentPhySensorUnitsDisplay_1 = ".1.3.6.1.2.1.99.1.1.1.6.1";
+const char* oidentPhySensorValueTimeStamp_1 = ".1.3.6.1.2.1.99.1.1.1.7.1";
+const char* oidentPhySensorValueUpdateRate_1 = ".1.3.6.1.2.1.99.1.1.1.8.1";
 
 int entPhySensorType_1 = 8;       // Celsius
 int entPhySensorScale_1 = 9;      // Units
 int entPhySensorPrecision_1 = 0;
 int entPhySensorValue_1 = 0;      // Value to be updated
 int entPhySensorOperStatus_1 = 1; // OK
-std::string entPhySensorUnitsDisplay_1 = "Celsius";
-int entPhySensorValueTimeStamp_1 = 0;
+char entPhySensorUnitsDisplay_1[] = "Celsius";
+uint32_t entPhySensorValueTimeStamp_1 = 0;
 int entPhySensorValueUpdateRate_1 = 0; // Unknown at declaration, set later.
 //************************************
 
@@ -143,9 +194,9 @@ void printFile(const char* filename);
 void setup()
 {
     Serial.begin(115200);
-    if (!LITTLEFS.begin(FORMAT_LITTLEFS_IF_FAILED))
+    if (!FS_BEGIN())
     {
-        Serial.println("LITTLEFS Mount Failed");
+        Serial.println("LittleFS Mount Failed");
         return;
     }
     WiFi.begin(ssid, password);
@@ -210,7 +261,7 @@ int readFakeSensor()
 {
     int min = -50;
     int max = 100;
-    return min + esp_random() % ((max + 1) - min);
+    return min + (int)(SNMP_RAND() % (uint32_t)((max + 1) - min));
 }
 
 #if defined(ESP32)
@@ -240,7 +291,7 @@ int getUptime()
 void printFile(const char* filename)
 {
     // Open file for reading
-    File file = LITTLEFS.open(filename, "r");
+    File file = FILESYSTEM.open(filename, "r");
     if (!file)
     {
         Serial.println(F("Failed to read file"));
@@ -258,7 +309,7 @@ void printFile(const char* filename)
 
 bool loadSNMPValues()
 {
-    File file = LITTLEFS.open(savedValuesFile, "r");
+    File file = FILESYSTEM.open(savedValuesFile, "r");
     if (!file)
     {
         Serial.println(F("Failed to read saved values file"));
@@ -292,7 +343,7 @@ bool loadSNMPValues()
 bool saveSNMPValues()
 {
 
-    File file = LITTLEFS.open(savedValuesFile, "w");
+    File file = FILESYSTEM.open(savedValuesFile, "w");
     if (!file)
     {
         Serial.println(F("Failed to open saved values file for writing"));
@@ -324,9 +375,12 @@ void addRFC1213MIBHandler()
     snmp.addIntegerHandler(oidSysServices, &sysServices);
     snmp.addTimestampHandler(oidSysUptime, &sysUptime);
     // Add Settable Handlers
-    snmp.addReadWriteStringHandler(oidSysContact, &sysContact, 25, true);
-    snmp.addReadWriteStringHandler(oidSysName, &sysName, 25, true);
-    snmp.addReadWriteStringHandler(oidSysLocation, &sysLocation, 25, true);
+    // NOTE: maxLength = sizeof(_buf) matches the 255-byte storage declared above,
+    // so SET operations via SNMP and strlcpy() from persistent storage agree on the
+    // same maximum string length.
+    snmp.addReadWriteStringHandler(oidSysContact,  &sysContact,  sizeof(sysContactValue),  true);
+    snmp.addReadWriteStringHandler(oidSysName,     &sysName,     sizeof(sysNameValue),     true);
+    snmp.addReadWriteStringHandler(oidSysLocation, &sysLocation, sizeof(sysLocationValue), true);
 }
 
 void addENTITYMIBHandler()

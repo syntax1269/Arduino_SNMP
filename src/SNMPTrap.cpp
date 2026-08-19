@@ -1,82 +1,135 @@
 #include "SNMPTrap.h"
 #include "include/SNMPParser.h"
+#include "include/defs.h"
+
+OIDType SNMPTrap::s_timestampOID(RFC1213_OID_sysUpTime);
+OIDType SNMPTrap::s_snmpTrapOID(SNMPv2_SNMPTRAP_OID_0);
 
 SNMPTrap::~SNMPTrap(){
-    delete timestampOID;
-    delete snmpTrapOID;
-    delete packet;
+    asn_delete(packet);
 }
 
 bool SNMPTrap::build(){
-    // Building V1 Traps
-    delete packet;
+    asn_delete(packet);
 
     if(!this->trapOID) return false;
 
-    packet = new ComplexType(STRUCTURE);
+    ComplexType* root = asn_new<ComplexType>(STRUCTURE);
+    root->_ownsChildren = true;
+    packet = root;
 
-    packet->addValueToList(std::make_shared<IntegerType>((int)this->snmpVersion));
-    packet->addValueToList(std::make_shared<OctetType>(this->communityString.c_str()));
-    auto trapPDU = std::make_shared<ComplexType>(TrapPDU);
-    
-    trapPDU->addValueToList(trapOID->cloneOID());
-    trapPDU->addValueToList(std::make_shared<NetworkAddress>(agentIP));
-    trapPDU->addValueToList(std::make_shared<IntegerType>(genericTrap));
-    trapPDU->addValueToList(std::make_shared<IntegerType>(specificTrap));
-    
+    root->addValueToListRaw(asn_new<IntegerType>((int)this->snmpVersion));
+    root->addValueToListRaw(asn_new<OctetType>(this->communityString));
+
+    ComplexType* trapPDU = asn_new<ComplexType>(TrapPDU);
+    trapPDU->_ownsChildren = true;
+
+    trapPDU->addValueToListRaw(trapOID->cloneRaw());
+    trapPDU->addValueToListRaw(asn_new<NetworkAddress>(agentIP));
+    trapPDU->addValueToListRaw(asn_new<IntegerType>(genericTrap));
+    trapPDU->addValueToListRaw(asn_new<IntegerType>(specificTrap));
+
     if(uptimeCallback){
-        trapPDU->addValueToList(std::static_pointer_cast<TimestampType>(ValueCallback::getValueForCallback(uptimeCallback)));
+        auto sp = std::static_pointer_cast<TimestampType>(ValueCallback::getValueForCallback(uptimeCallback));
+        if(sp) trapPDU->addValueToListRaw(asn_new<TimestampType>(sp->_value));
+        else   trapPDU->addValueToListRaw(asn_new<TimestampType>(0));
     } else {
-        trapPDU->addValueToList(std::make_shared<TimestampType>(0));
+        trapPDU->addValueToListRaw(asn_new<TimestampType>(0));
     }
 
-    auto ourVBList = this->generateVarBindList();
+    ComplexType* ourVBList = this->generateVarBindListRaw();
     if(!ourVBList) return false;
-    
-    trapPDU->addValueToList(ourVBList);
-    packet->addValueToList(trapPDU);
+
+    trapPDU->addValueToListRaw(ourVBList);
+    root->addValueToListRaw(trapPDU);
     return true;
 }
 
-std::shared_ptr<ComplexType> SNMPTrap::generateVarBindList(){
-    SNMP_LOGD("generateVarBindList from SNMPTrap");
-    auto ourVBList = std::make_shared<ComplexType>(STRUCTURE);
-    // If we're an SNMPv2 Trap, our first two are timestamp and OIDType, v1 already has them included
+ComplexType* SNMPTrap::generateVarBindListRaw(){
+    SNMP_LOGD("generateVarBindListRaw from SNMPTrap");
+    ComplexType* ourVBList = asn_new<ComplexType>(STRUCTURE);
+    ourVBList->_ownsChildren = true;
+
     if(this->snmpVersion == SNMP_VERSION_2C){
         if(!this->trapOID){
+            asn_delete(ourVBList);
             return nullptr;
         }
-        // Timestamp
-        auto timestampVarBind = std::make_shared<ComplexType>(STRUCTURE);
-        timestampVarBind->addValueToList(timestampOID->cloneOID());
+        ComplexType* timestampVarBind = asn_new<ComplexType>(STRUCTURE);
+        timestampVarBind->_ownsChildren = true;
+        timestampVarBind->addValueToListRaw(timestampOID->cloneRaw());
 
         if(uptimeCallback){
-            timestampVarBind->addValueToList(std::static_pointer_cast<TimestampType>(ValueCallback::getValueForCallback(uptimeCallback)));
+            auto sp = std::static_pointer_cast<TimestampType>(ValueCallback::getValueForCallback(uptimeCallback));
+            if(sp) timestampVarBind->addValueToListRaw(asn_new<TimestampType>(sp->_value));
+            else   timestampVarBind->addValueToListRaw(asn_new<TimestampType>(0));
         } else {
-            timestampVarBind->addValueToList(std::make_shared<TimestampType>(0));
+            timestampVarBind->addValueToListRaw(asn_new<TimestampType>(0));
         }
-        ourVBList->addValueToList(timestampVarBind);
+        ourVBList->addValueToListRaw(timestampVarBind);
 
-        // OID
-        auto oidVarBind = std::make_shared<ComplexType>(STRUCTURE);
-        oidVarBind->addValueToList(snmpTrapOID->cloneOID());
-        oidVarBind->addValueToList(trapOID->cloneOID());
-        ourVBList->addValueToList(oidVarBind);
+        ComplexType* oidVarBind = asn_new<ComplexType>(STRUCTURE);
+        oidVarBind->_ownsChildren = true;
+        oidVarBind->addValueToListRaw(snmpTrapOID->cloneRaw());
+        oidVarBind->addValueToListRaw(trapOID->cloneRaw());
+        ourVBList->addValueToListRaw(oidVarBind);
     }
 
-    for(auto value : this->callbacks){
+    for(int i = 0; i < callbacksCount; i++){
+        ValueCallback* value = callbacks[i];
         if(!value) continue;
-        auto varBind = std::make_shared<ComplexType>(STRUCTURE);
+        ComplexType* varBind = asn_new<ComplexType>(STRUCTURE);
+        varBind->_ownsChildren = true;
 
-        varBind->addValueToList(value->OID->cloneOID());
-        varBind->addValueToList(ValueCallback::getValueForCallback(value));
+        varBind->addValueToListRaw(value->OID->cloneRaw());
 
-        ourVBList->addValueToList(varBind);
+        auto valueSP = ValueCallback::getValueForCallback(value);
+        BER_CONTAINER* src = valueSP.get();
+        BER_CONTAINER* clonedValue = nullptr;
+        if(!src){
+            clonedValue = asn_new<NullType>();
+        } else switch(src->_type){
+            case INTEGER:        clonedValue = asn_new<IntegerType>(static_cast<IntegerType*>(src)->_value); break;
+            case STRING:
+            {
+                OctetType* so = static_cast<OctetType*>(src);
+                clonedValue = asn_new<OctetType>(so->_value, so->_valueLen);
+            } break;
+            case OID:            clonedValue = static_cast<OIDType*>(src)->cloneRaw(); break;
+            case NULLTYPE:       clonedValue = asn_new<NullType>(); break;
+            case NOSUCHOBJECT:   clonedValue = asn_new<ImplicitNullType>(NOSUCHOBJECT); break;
+            case NOSUCHINSTANCE: clonedValue = asn_new<ImplicitNullType>(NOSUCHINSTANCE); break;
+            case ENDOFMIBVIEW:   clonedValue = asn_new<ImplicitNullType>(ENDOFMIBVIEW); break;
+            case NETWORK_ADDRESS:
+            {
+                NetworkAddress* so = static_cast<NetworkAddress*>(src);
+                clonedValue = asn_new<NetworkAddress>(so->_value);
+            } break;
+            case TIMESTAMP:      clonedValue = asn_new<TimestampType>(static_cast<TimestampType*>(src)->_value); break;
+            case COUNTER32:      clonedValue = asn_new<Counter32>(static_cast<Counter32*>(src)->_value); break;
+            case GAUGE32:        clonedValue = asn_new<Gauge>(static_cast<Gauge*>(src)->_value); break;
+            case COUNTER64:      clonedValue = asn_new<Counter64>(static_cast<Counter64*>(src)->_value); break;
+            case OPAQUE:
+            {
+                OpaqueType* so = static_cast<OpaqueType*>(src);
+                clonedValue = asn_new<OpaqueType>(so->_value, so->_dataLength);
+            } break;
+            default:
+                clonedValue = asn_new<NullType>(); break;
+        }
+        varBind->addValueToListRaw(clonedValue);
+
+        ourVBList->addValueToListRaw(varBind);
     }
 
     return ourVBList;
 }
 
+std::shared_ptr<ComplexType> SNMPTrap::generateVarBindList(){
+    return std::shared_ptr<ComplexType>(generateVarBindListRaw());
+}
+
 void SNMPTrap::addOIDPointer(ValueCallback* callback){
-    this->callbacks.push_back(callback);
+    if(callbacksCount >= SNMP_MAX_CALLBACKS_PER_TRAP) return;
+    callbacks[callbacksCount++] = callback;
 }

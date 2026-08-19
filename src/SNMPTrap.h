@@ -1,10 +1,6 @@
-// we're going to have a trap object, which is created in setup. it includes the main trapOID, other trap-ish options, and an attached list of the OIDCallback objects (the ones you get back from addIntegerHandler etc) to contain the values that need to be ent with this Trap.
-// it ca then be called from code, trap->send or whatever. trap receivers should also be attached to a list that can be changed
-
 #ifndef SNMPTrap_h
 #define SNMPTrap_h
 
-#include <list>
 #include "include/ValueCallbacks.h"
 #include "include/defs.h"
 #include "include/SNMPPacket.h"
@@ -29,8 +25,6 @@ class SNMPTrap : public SNMPPacket {
   public:
     SNMPTrap(const char* community, SNMP_VERSION version){
         this->setVersion(version);
-        // Version two will use the SNMPPacket builder which uses the member pduType
-        // Version one will use special builder with hardcoded PDU Type
         this->setPDUType(Trapv2PDU);
         this->setCommunityString(community);
     };
@@ -63,7 +57,6 @@ class SNMPTrap : public SNMPPacket {
         this->setPDUType(pduType);
         return true;
     }
-    // the setters that need to be configured for each trap.
     
     void setTrapOID(OIDType* oid){
         trapOID = oid;
@@ -73,7 +66,7 @@ class SNMPTrap : public SNMPPacket {
         specificTrap = num;
     }
 
-    void setIP(IPAddress ip){ // sets our IP
+    void setIP(IPAddress ip){
         agentIP = ip;
     }
     
@@ -98,17 +91,11 @@ class SNMPTrap : public SNMPPacket {
     UDP* _udp = nullptr;
 
     bool buildForSending(){
-        // This is the start of a fresh send, we're going to reset our requestID, and build the packet
         this->setRequestID(SNMPPacket::generate_request_id());
 
-        // Flow for v2Trap/v2Inform is SNMPPacket::build()  -> SNMPTrap::generateVarBindList() -> v2 logic
-        // flow for v1Trap is          SNMPTrap::build()    -> SNMPTrap::generateVarBindList() -> v1 logic
-
         if(this->snmpVersion == SNMP_VERSION_1){
-            // Version 1 needs a special structure, so we overwrite the building part
             return this->build();
         } else {
-            // Version 2 will use regular packet building but call back our generateVarBindList, so we can still use callbacks
             return SNMPPacket::build();
         }
     }
@@ -143,12 +130,16 @@ class SNMPTrap : public SNMPPacket {
     }
 
   protected:
-    std::list<ValueCallback*> callbacks;
+    ValueCallback* callbacks[SNMP_MAX_CALLBACKS_PER_TRAP] = {nullptr};
+    int callbacksCount = 0;
 
     std::shared_ptr<ComplexType> generateVarBindList() override;
+    ComplexType* generateVarBindListRaw() override;
 
-    OIDType* timestampOID = new OIDType(".1.3.6.1.2.1.1.3.0");
-    OIDType* snmpTrapOID  = new OIDType(".1.3.6.1.2.1.1.2.0");
+    static OIDType s_timestampOID;
+    static OIDType s_snmpTrapOID;
+    OIDType* timestampOID = &s_timestampOID;
+    OIDType* snmpTrapOID  = &s_snmpTrapOID;
 
     bool build() override;
 };

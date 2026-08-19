@@ -12,6 +12,8 @@ MOCK_DEPS := $(MOCK_OBJS:.o=.d)
 EXAMPLE_SRCS := $(shell find $(SRC_DIRS) \( -name \*.cpp -o -name ESP32_SNMP.ino \) \! -name mock.cpp \! -name tests.cpp \! -name CMakeCXXCompilerId.cpp)
 EXAMPLE_OBJS := $(EXAMPLE_SRCS:%=$(BUILD_DIR)/%.o)
 
+.DELETE_ON_ERROR:
+
 CC = c++
 CXX = c++
 
@@ -29,6 +31,7 @@ ifdef DEBUG
 endif
 help:
 	@echo "test: Make & Run tests"
+	@echo "ci-test: clean first, then make & run tests (for GitHub Actions / CI runners with build-dir caching)"
 
 $(BUILD_DIR)/test: $(TEST_OBJS)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)
@@ -51,7 +54,7 @@ $(BUILD_DIR)/%.ino.o: %.ino
 	rm $@.cpp
 
 
-.PHONY: clean test benchmark example
+.PHONY: clean test benchmark example ci-test
 
 clean:
 	$(RM) -r ./build
@@ -66,6 +69,8 @@ mock: $(BUILD_DIR)/mock
 	$(BUILD_DIR)/mock
 	
 example: $(BUILD_DIR)/example
+
+ci-test: clean test
 
 -include $(MOCK_DEPS) $(TEST_DEPS) 
 

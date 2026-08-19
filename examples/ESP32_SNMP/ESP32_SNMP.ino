@@ -1,8 +1,26 @@
 #if defined (ESP8266)
-    #include <ESP8266WiFi.h>        // ESP8266 Core WiFi Library         
+    #include <ESP8266WiFi.h>        // ESP8266 Core WiFi Library
 #else
-    #include <WiFi.h>               // ESP32 Core WiFi Library    
+    #include <WiFi.h>               // ESP32 Core WiFi Library
 #endif
+
+/* -------------------------------------------------------------------------- *
+ * COMPILE-TIME TUNING (optional, BEFORE #include <SNMP_Agent.h>)
+ *
+ *   All SNMP size constants in src/include/defs.h are wrapped with
+ *   `#ifndef ... #endif` so a sketch-side #define placed here wins over the
+ *   library defaults. Good targets for ESP-01 1 MB / 80 KB RAM sensors:
+ *
+ *   #define SNMP_MAX_COMPLEX_CHILDREN       8
+ *   #define SNMP_MAX_VARBINDS               4
+ *   #define SNMP_MAX_CALLBACKS_PER_AGENT   16
+ *   #define SNMP_MAX_TRAPS_INFLIGHT         4
+ *   #define SNMP_POOL_ASN_OBJECTS          32
+ *   #define SNMP_POOL_VARBIND_OBJECTS      12
+ *
+ *   Saves ~25 KB BSS (ASNPool halves: (64 - 32) * 768 B = 24,576 B) and a
+ *   few KB more from smaller fixed callback/varbind arrays.
+ * -------------------------------------------------------------------------- */
 
 #include <WiFiUdp.h>
 #include <SNMP_Agent.h>
@@ -21,7 +39,7 @@ int settableNumber = 0;
 uint32_t tensOfMillisCounter = 0;
 
 // arbitrary data will be stored here to act as an OPAQUE data-type
-uint8_t* stuff = 0;
+uint8_t stuff[4];
 
 
 // If we want to change the functionaality of an OID callback later, store them here.
@@ -29,11 +47,12 @@ ValueCallback* changingNumberOID;
 ValueCallback* settableNumberOID;
 TimestampCallback* timestampCallbackOID;
 
-std::string staticString = "This value will never change";
+char staticString[] = "This value will never change";
 
 // Setup an SNMPTrap for later use
 SNMPTrap* settableNumberTrap = new SNMPTrap("public", SNMP_VERSION_2C);
-char* changingString;
+char _changingStringBuf[25];
+char* changingString = _changingStringBuf;
 
 void setup(){
     Serial.begin(115200);
@@ -57,7 +76,6 @@ void setup(){
     snmp.begin();
 
     // setup our OPAQUE data-type
-    stuff = (uint8_t*)malloc(4);
     stuff[0] = 1;
     stuff[1] = 2;
     stuff[2] = 24;
@@ -80,7 +98,6 @@ void setup(){
     snmp.addReadOnlyStaticStringHandler(".1.3.6.1.4.1.5.11", staticString);
     
     // Setup read/write string
-    changingString = (char*)malloc(25 * sizeof(char));
     snprintf(changingString, 25, "This is changeable");
     snmp.addReadWriteStringHandler(".1.3.6.1.4.1.5.12", &changingString, 25, true);
 

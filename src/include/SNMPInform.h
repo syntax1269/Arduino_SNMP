@@ -9,9 +9,6 @@
     #include "tests/required/IPAddress.h"
 #endif
 
-#include <list>
-#include <functional>
-
 struct InformItem {
     snmp_request_id_t requestID;
     int retries;
@@ -23,8 +20,8 @@ struct InformItem {
     bool missed;
 };
 
-snmp_request_id_t queue_and_send_trap(std::list<struct InformItem *> &informList, SNMPTrap* trap, const IPAddress& ip, bool replaceQueuedRequests, int retries, int delay_ms);
-void inform_callback(std::list<struct InformItem *> &informList, snmp_request_id_t requestID, bool responseReceiveSuccess);
-void handle_inform_queue(std::list<struct InformItem*> &informList);
-void mark_trap_deleted(std::list<struct InformItem*> &informList, SNMPTrap* trap);
+snmp_request_id_t queue_and_send_trap(struct InformItem **informList, int& informCount, SNMPTrap* trap, const IPAddress& ip, bool replaceQueuedRequests, int retries, int delay_ms);
+void inform_callback(struct InformItem **informList, int& informCount, snmp_request_id_t requestID, bool responseReceiveSuccess);
+void handle_inform_queue(struct InformItem **informList, int& informCount);
+void mark_trap_deleted(struct InformItem **informList, int& informCount, SNMPTrap* trap);
 #endif
