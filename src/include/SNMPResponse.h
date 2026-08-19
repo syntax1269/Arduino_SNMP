@@ -5,7 +5,6 @@
 #include "SNMPPacket.h"
 #include "defs.h"
 #include "ValueCallbacks.h"
-#include <vector>
 
 #if 0
 class ResponseVarBind : public VarBind {
