@@ -109,12 +109,12 @@ int NullType::serialise(uint8_t* buf, size_t max_len){
 
 
 int OctetType::serialise(uint8_t* buf, size_t max_len){
-    int i = BER_CONTAINER::serialise(buf, max_len, _value.length());
+    int i = BER_CONTAINER::serialise(buf, max_len, _valueLen);
     CHECK_ENCODE_ERR(i);
     uint8_t *ptr = buf + i;
 
-    memcpy(ptr, _value.data(), _value.length());
-    ptr += _value.length();
+    memcpy(ptr, _value, _valueLen);
+    ptr += _valueLen;
 
     return ptr - buf;
 }
@@ -131,52 +131,55 @@ int OpaqueType::serialise(uint8_t* buf, size_t max_len){
 }
 
 int OIDType::serialise(uint8_t* buf, size_t max_len){
-    int i = BER_CONTAINER::serialise(buf, max_len, this->data.size());
+    int i = BER_CONTAINER::serialise(buf, max_len, (size_t)this->dataLen);
     CHECK_ENCODE_ERR(i);
     if(!this->valid) return SNMP_BUFFER_ENCODE_ERROR_INVALID_OID;
 
-    uint8_t* ptr = buf + i;
-    memcpy(ptr, this->data.data(), this->data.size());
+    if(static_cast<size_t>(i + this->dataLen) > max_len) {
+        return SNMP_BUFFER_ENCODE_ERR_LEN_EXCEEDED;
+    }
 
-    ptr += this->data.size();
+    uint8_t* ptr = buf + i;
+    if(this->dataLen > 0) memcpy(ptr, this->data, (size_t)this->dataLen);
+
+    ptr += this->dataLen;
     return ptr - buf;
 }
 
 bool OIDType::generateInternalData() {
-    if(_value.find(".1.3.") != 0) { this->valid = false; return false; }; // Invalid OID
+    if(strncmp(_valueStr, ".1.3.", 5) != 0) { this->valid = false; return false; };
 
-    this->data.clear();
-    this->data.push_back(0x2b); // first byte
+    this->dataLen = 0;
+    if(this->dataLen >= (int)sizeof(this->data)) return false;
+    this->data[this->dataLen++] = 0x2b;
 
-    char* valuePtr = &_value[5];
+    const char* valuePtr = _valueStr + 5;
 
+    uint8_t temp[10];
     while(*valuePtr != 0){
         bool toBreak = false;
-        char* startNum = valuePtr;
+        const char* startNum = valuePtr;
 
-        // Find the end of this item (next dot or end of string)
-        char* endNum = strchr(startNum, '.');
-        if(!endNum) {
-            toBreak = true;
-        }
+        const char* endNum = strchr(startNum, '.');
+        if(!endNum) toBreak = true;
 
-        long tempVal;
-        uint8_t temp[10] = {0};
-        if(sscanf(startNum, "%ld.", &tempVal)){
-            int encoded_length = encode_ber_longform_integer(temp, tempVal, 10);
+        long tempVal = strtol(startNum, nullptr, 10);
+        if(tempVal == 0 && *startNum != '0') return false;
 
-            for(int i = 0; i < encoded_length; i++){
-                this->data.push_back(temp[i]);
-            }
-
-            if(toBreak) break;
-            valuePtr = endNum+1;
-        } else {
+        int encoded_length = (int)encode_ber_longform_integer(temp, tempVal, (int)sizeof(temp));
+        if(this->dataLen + encoded_length > (int)sizeof(this->data)) {
+            this->valid = false;
             return false;
         }
+        for(int i = 0; i < encoded_length; i++){
+            this->data[this->dataLen++] = temp[i];
+        }
+
+        if(toBreak) break;
+        valuePtr = endNum + 1;
     }
 
-    this->_length = this->data.size();
+    this->_length = (int)this->dataLen;
     return true;
 }
 
@@ -197,7 +200,8 @@ int ComplexType::serialise(uint8_t* buf, size_t max_len){
 
     int internalLength = 0;
 
-    for(const auto& item : values){
+    for(int n = 0; n < this->valuesLen; n++){
+        BER_CONTAINER* item = this->values[n];
         if(!item) return SNMP_BUFFER_ENCODE_ERROR_INVALID_ITEM;
         int length = item->serialise(internalPtr, max_len - internalLength - 1);
         if(length < 0){

@@ -32,18 +32,18 @@
     }
 
 SNMPPacket::~SNMPPacket(){
-    delete this->packet;
+    asn_delete(this->packet);
 }
 
 SNMP_PACKET_PARSE_ERROR SNMPPacket::parsePacket(ComplexType *structure, enum SNMPParsingState state) {
-    for(const auto& value : structure->values){
-        if(state == DONE) break;
+    for(int n = 0; n < structure->valuesLen && state != DONE; n++){
+        BER_CONTAINER* value = structure->values[n];
 
         switch(state) {
 
             case SNMPVERSION:
                 ASSERT_ASN_STATE_TYPE(value, SNMPVERSION);
-                this->snmpVersionPtr = std::static_pointer_cast<IntegerType>(value);
+                this->snmpVersionPtr = std::shared_ptr<IntegerType>(asn_new<IntegerType>(static_cast<IntegerType*>(value)->_value));
                 this->snmpVersion = (SNMP_VERSION) this->snmpVersionPtr.get()->_value;
                 if (this->snmpVersion >= SNMP_VERSION_MAX) {
                     SNMP_LOGW("Invalid SNMP Version: %d\n", this->snmpVersion);
@@ -54,61 +54,75 @@ SNMP_PACKET_PARSE_ERROR SNMPPacket::parsePacket(ComplexType *structure, enum SNM
 
             case COMMUNITY:
                 ASSERT_ASN_STATE_TYPE(value, COMMUNITY);
-                this->communityStringPtr = std::static_pointer_cast<OctetType>(value);
-                this->communityString = this->communityStringPtr.get()->_value;
+                {
+                    OctetType* src = static_cast<OctetType*>(value);
+                    this->communityStringPtr = std::shared_ptr<OctetType>(asn_new<OctetType>(src->_value, src->_valueLen));
+                }
+                {
+                    size_t len = this->communityStringPtr.get()->_valueLen;
+                    if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
+                    memcpy(this->communityString, this->communityStringPtr.get()->_value, len);
+                    this->communityString[len] = 0;
+                }
                 state = PDU;
             break;
 
             case PDU:
                 ASSERT_ASN_PARSING_TYPE_RANGE(value, ASN_PDU_TYPE_MIN_VALUE, ASN_PDU_TYPE_MAX_VALUE)
                 this->packetPDUType = value->_type;
-                return this->parsePacket(static_cast<ComplexType*>(value.get()), REQUESTID);
+                return this->parsePacket(static_cast<ComplexType*>(value), REQUESTID);
 
             case REQUESTID:
                 ASSERT_ASN_STATE_TYPE(value, REQUESTID);
-                this->requestIDPtr = std::static_pointer_cast<IntegerType>(value);
+                this->requestIDPtr = std::shared_ptr<IntegerType>(asn_new<IntegerType>(static_cast<IntegerType*>(value)->_value));
                 this->requestID = this->requestIDPtr.get()->_value;
                 state = ERRORSTATUS;
             break;
 
             case ERRORSTATUS:
                 ASSERT_ASN_STATE_TYPE(value, ERRORSTATUS);
-                this->errorStatus.errorStatus = (SNMP_ERROR_STATUS) static_cast<IntegerType *>(value.get())->_value;
+                this->errorStatus.errorStatus = (SNMP_ERROR_STATUS) static_cast<IntegerType *>(value)->_value;
                 state = ERRORID;
             break;
 
             case ERRORID:
                 ASSERT_ASN_STATE_TYPE(value, ERRORID);
-                this->errorIndex.errorIndex = static_cast<IntegerType*>(value.get())->_value;
+                this->errorIndex.errorIndex = static_cast<IntegerType*>(value)->_value;
                 state = VARBINDS;
             break;
 
             case VARBINDS:
                 ASSERT_ASN_STATE_TYPE(value, VARBINDS);
                 // we have a varbind structure, lets dive into it.
-                return this->parsePacket(static_cast<ComplexType*>(value.get()), VARBIND);
+                return this->parsePacket(static_cast<ComplexType*>(value), VARBIND);
 
             case VARBIND:
             {
                 ASSERT_ASN_STATE_TYPE(value, VARBIND);
                 // we are in a single varbind
 
-                auto varbindValues = std::static_pointer_cast<ComplexType>(value);
+                ComplexType* varbindValues = static_cast<ComplexType*>(value);
 
-                if (varbindValues->values.size() != 2) {
-                    SNMP_LOGW("Expecting VARBIND TO CONTAIN 2 OBEJCTS; %lu\n",
-                              varbindValues ? varbindValues->values.size() : 0);
+                if (varbindValues->valuesLen != 2) {
+                    SNMP_LOGW("Expecting VARBIND TO CONTAIN 2 OBEJCTS; %d\n",
+                              varbindValues ? varbindValues->valuesLen : 0);
                     return SNMP_PARSE_ERROR_AT_STATE(VARBIND);
                 };
 
-                auto vbOid = varbindValues->values[0];
+                BER_CONTAINER* vbOid = varbindValues->values[0];
                 ASSERT_ASN_TYPE_AT_STATE(vbOid, OID, VARBIND);
 
-                auto vbValue = varbindValues->values[1];
-                this->varbindList.emplace_back(
-                    std::static_pointer_cast<OIDType>(vbOid),
-                    vbValue
-                );
+                BER_CONTAINER* vbValue = varbindValues->values[1];
+
+                /* Clone the OID so the VarBind holds an owning reference independent
+                 * of the incoming ComplexType tree (which will be delete'd when the
+                 * SNMPPacket object is reused or destroyed).  For value we wrap with
+                 * a no-op deleter: the caller's lifetime (packet processing + reply
+                 * serialise) always happens before packet destruction. */
+                std::shared_ptr<OIDType> oidClone = static_cast<OIDType*>(vbOid)->cloneOID();
+                std::shared_ptr<BER_CONTAINER> valueView(vbValue, [](BER_CONTAINER*){});
+
+                this->emplace_back(oidClone, valueView);
             }
             break;
 
@@ -126,7 +140,7 @@ SNMP_PACKET_PARSE_ERROR SNMPPacket::parseFrom(unsigned char* buf, size_t max_len
         return SNMP_PARSE_ERROR_MAGIC_BYTE;
     }
 
-    packet = new ComplexType(STRUCTURE);
+    packet = asn_new<ComplexType>(STRUCTURE);
 
     SNMP_BUFFER_PARSE_ERROR decodePacket = packet->fromBuffer(buf, max_len);
     if(decodePacket <= 0){
@@ -146,47 +160,50 @@ int SNMPPacket::serialiseInto(uint8_t* buf, size_t max_len){
 }
 
 bool SNMPPacket::build(){
-    // Delete the existing packet if we've built it before (generally only traps)
-    delete this->packet;
+    asn_delete(this->packet);
 
-    this->packet = new ComplexType(STRUCTURE);
-    // Try to reuse existing containers if we got em
+    ComplexType* root = asn_new<ComplexType>(STRUCTURE);
+    root->_ownsChildren = true;
+    this->packet = root;
+
     if(this->snmpVersionPtr)
-        this->packet->addValueToList(this->snmpVersionPtr);
+        root->addValueToListRaw(asn_new<IntegerType>(this->snmpVersionPtr->_value));
     else
-        this->packet->addValueToList(std::make_shared<IntegerType>(this->snmpVersion));
+        root->addValueToListRaw(asn_new<IntegerType>(this->snmpVersion));
 
     if(this->communityStringPtr)
-        this->packet->addValueToList(this->communityStringPtr);
+        root->addValueToListRaw(asn_new<OctetType>(this->communityStringPtr->_value, this->communityStringPtr->_valueLen));
     else
-        this->packet->addValueToList(std::make_shared<OctetType>(this->communityString.c_str()));
+        root->addValueToListRaw(asn_new<OctetType>(this->communityString));
 
-    auto snmpPDU = std::make_shared<ComplexType>(this->packetPDUType);
+    ComplexType* snmpPDU = asn_new<ComplexType>(this->packetPDUType);
+    snmpPDU->_ownsChildren = true;
 
     if(this->requestIDPtr)
-        snmpPDU->addValueToList(this->requestIDPtr);
+        snmpPDU->addValueToListRaw(asn_new<IntegerType>(this->requestIDPtr->_value));
     else
-        snmpPDU->addValueToList(std::make_shared<IntegerType>(this->requestID));
+        snmpPDU->addValueToListRaw(asn_new<IntegerType>(this->requestID));
 
 
-    snmpPDU->addValueToList(std::make_shared<IntegerType>(this->errorStatus.errorStatus));
-    snmpPDU->addValueToList(std::make_shared<IntegerType>(this->errorIndex.errorIndex));
+    snmpPDU->addValueToListRaw(asn_new<IntegerType>(this->errorStatus.errorStatus));
+    snmpPDU->addValueToListRaw(asn_new<IntegerType>(this->errorIndex.errorIndex));
 
-    // We need to do this dynamically incase we're building a trap, generateVarBindList is virtual
-    auto varBindList = this->generateVarBindList();
+    ComplexType* varBindList = this->generateVarBindListRaw();
     if(!varBindList) return false;
-    
-    snmpPDU->addValueToList(varBindList);
 
-    this->packet->addValueToList(snmpPDU);
+    snmpPDU->addValueToListRaw(varBindList);
+
+    root->addValueToListRaw(snmpPDU);
 
     return true;
 }
 
-void SNMPPacket::setCommunityString(const std::string &CommunityString){
-    // poison any cached containers we have
+void SNMPPacket::setCommunityString(const char *CommunityString){
     this->communityStringPtr = nullptr;
-    this->communityString = CommunityString;
+    size_t len = strlen(CommunityString);
+    if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
+    memcpy(this->communityString, CommunityString, len);
+    this->communityString[len] = 0;
 }
 
 void SNMPPacket::setRequestID(snmp_request_id_t RequestId){
@@ -208,21 +225,61 @@ void SNMPPacket::setVersion(SNMP_VERSION SnmpVersion){
     this->snmpVersion = SnmpVersion;
 }
 
-std::shared_ptr<ComplexType> SNMPPacket::generateVarBindList(){
-    SNMP_LOGD("generateVarBindList from SNMPPacket");
-    // This is for normal packets where our response values have already been built, not traps
-    auto varBindList = std::make_shared<ComplexType>(STRUCTURE);
+ComplexType* SNMPPacket::generateVarBindListRaw(){
+    SNMP_LOGD("generateVarBindListRaw from SNMPPacket");
+    ComplexType* list = asn_new<ComplexType>(STRUCTURE);
+    list->_ownsChildren = true;
 
-    for(const auto& varBindItem : varbindList){
-        auto varBind = std::make_shared<ComplexType>(STRUCTURE);
+    for(int vbIdx = 0; vbIdx < this->varbindCount; vbIdx++){
+        const VarBind& varBindItem = this->varbindList[vbIdx];
+        ComplexType* varBind = asn_new<ComplexType>(STRUCTURE);
+        varBind->_ownsChildren = true;
 
-        varBind->addValueToList(varBindItem.oid);
-        varBind->addValueToList(varBindItem.value);
+        varBind->addValueToListRaw(varBindItem.oid->cloneRaw());
 
-        varBindList->addValueToList(varBind);
+        BER_CONTAINER* src = varBindItem.value;
+        BER_CONTAINER* clonedValue = nullptr;
+        if(!src){
+            clonedValue = asn_new<NullType>();
+        } else switch(src->_type){
+            case INTEGER:        clonedValue = asn_new<IntegerType>(static_cast<IntegerType*>(src)->_value); break;
+            case STRING:
+            {
+                OctetType* so = static_cast<OctetType*>(src);
+                clonedValue = asn_new<OctetType>(so->_value, so->_valueLen);
+            } break;
+            case OID:            clonedValue = static_cast<OIDType*>(src)->cloneRaw(); break;
+            case NULLTYPE:       clonedValue = asn_new<NullType>(); break;
+            case NOSUCHOBJECT:   clonedValue = asn_new<ImplicitNullType>(NOSUCHOBJECT); break;
+            case NOSUCHINSTANCE: clonedValue = asn_new<ImplicitNullType>(NOSUCHINSTANCE); break;
+            case ENDOFMIBVIEW:   clonedValue = asn_new<ImplicitNullType>(ENDOFMIBVIEW); break;
+            case NETWORK_ADDRESS:
+            {
+                NetworkAddress* so = static_cast<NetworkAddress*>(src);
+                clonedValue = asn_new<NetworkAddress>(so->_value);
+            } break;
+            case TIMESTAMP:      clonedValue = asn_new<TimestampType>(static_cast<TimestampType*>(src)->_value); break;
+            case COUNTER32:      clonedValue = asn_new<Counter32>(static_cast<Counter32*>(src)->_value); break;
+            case GAUGE32:        clonedValue = asn_new<Gauge>(static_cast<Gauge*>(src)->_value); break;
+            case COUNTER64:      clonedValue = asn_new<Counter64>(static_cast<Counter64*>(src)->_value); break;
+            case OPAQUE:
+            {
+                OpaqueType* so = static_cast<OpaqueType*>(src);
+                clonedValue = asn_new<OpaqueType>(so->_value, so->_dataLength);
+            } break;
+            default:
+                clonedValue = asn_new<NullType>(); break;
+        }
+        varBind->addValueToListRaw(clonedValue);
+
+        list->addValueToListRaw(varBind);
     }
 
-    return varBindList;
+    return list;
+}
+
+std::shared_ptr<ComplexType> SNMPPacket::generateVarBindList(){
+    return std::shared_ptr<ComplexType>(generateVarBindListRaw());
 }
 
 snmp_request_id_t SNMPPacket::generate_request_id(){

@@ -1,5 +1,50 @@
 #include "include/BER.h"
 
+#ifndef SNMP_POOLS_IN_BSS
+    /* Allocate the ASNPool storage once at startup (first asn_new call).
+       Count and layout are fixed at compile time — never reallocated, never
+       grown, complying with the "heap only at init, zero runtime growth"
+       rule.  This moves ~25 KB of static BSS (.bss) into the heap on
+       ESP8266 tiny profiles, restoring WiFi/LittleFS/ArduinoJson headroom. */
+    ASNPool::Slot* ASNPool::slots = nullptr;
+    bool ASNPool::_poolsReady = false;
+
+    void ASNPool::_ensurePools() {
+        if(_poolsReady) return;
+        /* operator new[] calls each Slot's default ctor; Slot is trivially
+           default-constructible (alignas char[N] array + bool) so we get
+           zero-initialized occupied and untouched storage bytes as required. */
+        slots = new Slot[SNMP_POOL_ASN_OBJECTS]();
+        _poolsReady = true;
+    }
+#else
+    ASNPool::Slot ASNPool::slots[SNMP_POOL_ASN_OBJECTS] = {};
+#endif
+int ASNPool::usedCount = 0;
+
+void ASNPool::release(BER_CONTAINER* p){
+    if(!p) return;
+#ifndef SNMP_POOLS_IN_BSS
+    if(!_poolsReady) { delete p; return; }
+#endif
+    p->~BER_CONTAINER();
+    for(int i = 0; i < SNMP_POOL_ASN_OBJECTS; i++){
+        if(static_cast<void*>(slots[i].storage) == static_cast<void*>(p)){
+            slots[i].occupied = false;
+            if(usedCount > 0) usedCount--;
+            return;
+        }
+    }
+}
+
+void asn_delete(BER_CONTAINER* p){
+    if(!p) return;
+    if(ASNPool::isInPool(static_cast<const void*>(p))){
+        ASNPool::release(p);
+    } else {
+        delete p;
+    }
+}
 // Two ways to decode an int, one way where the first byte indicates how many butes follow, and ne where you have to power things by 128
 static size_t decode_ber_longform_integer(const uint8_t* buf, long* decoded_integer, int max_len){
     int i = 1;
@@ -33,22 +78,21 @@ static size_t decode_ber_length_integer(const uint8_t* buf, int* decoded_integer
 }
 
 int BER_CONTAINER::fromBuffer(const uint8_t *buf, size_t max_len) {
-    // In the base class we are going to double check our type, and decode the length of this structure, then return bytes read
-    if(max_len < 2) return SNMP_BUFFER_ERROR_TLV_TOO_SMALL; // Too small for any type
+    if(max_len < 2) return SNMP_BUFFER_ERROR_TLV_TOO_SMALL;
 
     const uint8_t* ptr = buf;
     if(*ptr != _type){
         SNMP_LOGE("Mismatched type when decoding %d, %d\n", _type, *ptr);
         return SNMP_BUFFER_ERROR_TYPE_MISMATCH;
     }
-    ptr++; // type
-    ptr += decode_ber_length_integer(ptr, &_length, max_len);
-    if((size_t)_length + 2 > max_len){
-        // length of object is too big to read in
+    ptr++;
+    ptr += decode_ber_length_integer(ptr, &_length, (int)max_len - 1);
+    int header_len = static_cast<int>(ptr - buf);
+    if(static_cast<size_t>(_length) + header_len > max_len){
         return SNMP_BUFFER_ERROR_MAX_LEN_EXCEEDED;
     }
 
-    return ptr - buf;
+    return header_len;
 }
 
 int NetworkAddress::fromBuffer(const uint8_t *buf, size_t max_len){
@@ -106,7 +150,10 @@ int OctetType::fromBuffer(const uint8_t *buf, size_t max_len){
     const uint8_t* ptr = buf + i;
     if(_length > OCTET_TYPE_MAX_LENGTH) return SNMP_BUFFER_ERROR_OCTET_TOO_BIG;
 
-    _value.assign((char*)ptr, _length);
+    if(_length > (int)SNMP_MAX_STRING_LEN) _length = (int)SNMP_MAX_STRING_LEN;
+    memcpy(_value, ptr, _length);
+    _value[_length] = 0;
+    _valueLen = _length;
 
     return _length + i;
 }
@@ -114,26 +161,39 @@ int OctetType::fromBuffer(const uint8_t *buf, size_t max_len){
 int OpaqueType::fromBuffer(const uint8_t *buf, size_t max_len){
     int i = BER_CONTAINER::fromBuffer(buf, max_len);
     CHECK_DECODE_ERR(i);
-    const uint8_t* ptr = buf + i;
 
-    _value = (uint8_t*)calloc(_length, sizeof(char));
-    memcpy(_value, (char*)ptr, _length);
+    if(_length > (int)sizeof(this->_value)) {
+        return SNMP_BUFFER_ERROR_MAX_LEN_EXCEEDED;
+    }
+
+    if(static_cast<size_t>(i + _length) > max_len) {
+        return SNMP_BUFFER_ERROR_MAX_LEN_EXCEEDED;
+    }
+
+    const uint8_t* ptr = buf + i;
+    if(_length > 0) {
+        memcpy(this->_value, ptr, (size_t)_length);
+    }
     _dataLength = _length;
 
-    return _length + i;
+    return i + _length;
 }
 
 int OIDType::fromBuffer(const uint8_t *buf, size_t max_len){
     int j = BER_CONTAINER::fromBuffer(buf, max_len);
     CHECK_DECODE_ERR(j);
-    const uint8_t* dataPtr = buf + j;
 
+    if(_length > (int)sizeof(this->data)) return SNMP_BUFFER_ERROR_MAX_LEN_EXCEEDED;
+    if(static_cast<size_t>(j + _length) > max_len) return SNMP_BUFFER_ERROR_MAX_LEN_EXCEEDED;
+
+    const uint8_t* dataPtr = buf + j;
     if(*dataPtr != 0x2b) return SNMP_BUFFER_ERROR_INVALID_OID;
-    this->data.reserve(_length);
-    this->data.assign(dataPtr, dataPtr + _length);
+
+    if(_length > 0) memcpy(this->data, dataPtr, (size_t)_length);
+    this->dataLen = _length;
     this->valid = true;
 
-    return _length + j;
+    return j + _length;
 }
 
 static inline void long_to_buf(char* buf, long l, short r = 0){
@@ -144,16 +204,23 @@ static inline void long_to_buf(char* buf, long l, short r = 0){
     if(!r) *buf = 0;
 }
 
-const std::string& OIDType::string() {
-    if(!this->_value.length()){
-        const uint8_t* dataPtr = this->data.data();
+const char* OIDType::string() {
+    if(_valueStr[0] == 0){
+        const uint8_t* dataPtr = this->data;
 
-        this->_value = ".1.3";
-        if(!this->valid) return this->_value;
+        size_t pos = 0;
+        const char* prefix = ".1.3";
+        size_t prefixLen = strlen(prefix);
+        if(pos + prefixLen <= SNMP_MAX_OID_STR_LEN){
+            memcpy(_valueStr + pos, prefix, prefixLen);
+            pos += prefixLen;
+        }
+        _valueStr[pos] = 0;
+        if(!this->valid) return _valueStr;
 
         dataPtr++;
 
-        int i = this->data.size() - 1;
+        int i = this->dataLen - 1;
         char buffer[16];
 
         while(i > 0){
@@ -164,31 +231,33 @@ const std::string& OIDType::string() {
 
             buffer[0] = '.';
             long_to_buf(buffer+1, item);
-            this->_value.append(buffer);
+            size_t buflen = strlen(buffer);
+            if(pos + buflen <= SNMP_MAX_OID_STR_LEN){
+                memcpy(_valueStr + pos, buffer, buflen);
+                pos += buflen;
+            }
+            _valueStr[pos] = 0;
         }
     }
-    return this->_value;
+    return _valueStr;
 }
 
-const std::vector<unsigned long> SortableOIDType::generateSortingMap() const {
-    auto map = std::vector<unsigned long>();
+void SortableOIDType::generateSortingMap(uint32_t outMap[SNMP_MAX_OID_SUBIDENTIFIERS], int* outLen) const {
+    int count = 0;
 
-    // maybe anice midway between speed and size?
-    map.reserve(this->data.size() * 1);
+    const uint8_t* ptr = this->data;
 
-    const uint8_t* ptr = this->data.data();
+    ptr += 1;
+    int i = this->dataLen - 1;
 
-    ptr += 1; // skip to start of interesting differences
-    int i = this->data.size() - 1;
-
-    while(i > 0){
+    while(i > 0 && count < SNMP_MAX_OID_SUBIDENTIFIERS){
         long item;
         size_t len = decode_ber_longform_integer(ptr, &item, i);
         ptr += len; i -= len;
-        map.push_back(item);
+        outMap[count++] = (uint32_t)item;
     }
 
-    return map;
+    *outLen = count;
 }
 
 int NullType::fromBuffer(const uint8_t *, size_t){
@@ -199,6 +268,9 @@ int NullType::fromBuffer(const uint8_t *, size_t){
 int Counter64::fromBuffer(const uint8_t *buf, size_t max_len){
     int i = BER_CONTAINER::fromBuffer(buf, max_len);
     CHECK_DECODE_ERR(i);
+
+    if(static_cast<size_t>(i + _length) > max_len) return SNMP_BUFFER_ERROR_MAX_LEN_EXCEEDED;
+
     const uint8_t* ptr = buf + i;
 
     int tempLength = _length;
@@ -208,44 +280,41 @@ int Counter64::fromBuffer(const uint8_t *buf, size_t max_len){
         _value = _value | *ptr++;
         tempLength--;
     }
-    return _length + i;
+    return i + _length;
 }
 
-std::shared_ptr<BER_CONTAINER> ComplexType::createObjectForType(ASN_TYPE valueType){
+BER_CONTAINER* ComplexType::createObjectForType(ASN_TYPE valueType){
     SNMP_LOGD("Creating object of type: %d\n", valueType);
     switch(valueType){
         case INTEGER:
-            return std::shared_ptr<BER_CONTAINER>(new IntegerType());
+            return asn_new<IntegerType>();
         case STRING:
-            return std::shared_ptr<BER_CONTAINER>(new OctetType());
+            return asn_new<OctetType>();
         case OID: 
-            return std::shared_ptr<BER_CONTAINER>(new OIDType());
+            return asn_new<OIDType>();
         case NULLTYPE:
-            return std::shared_ptr<BER_CONTAINER>(new NullType());
+            return asn_new<NullType>();
 
         case NOSUCHOBJECT:
-            return std::shared_ptr<BER_CONTAINER>(new ImplicitNullType(NOSUCHOBJECT));
+            return asn_new<ImplicitNullType>(NOSUCHOBJECT);
         case NOSUCHINSTANCE:
-            return std::shared_ptr<BER_CONTAINER>(new ImplicitNullType(NOSUCHINSTANCE));
+            return asn_new<ImplicitNullType>(NOSUCHINSTANCE);
         case ENDOFMIBVIEW:
-            return std::shared_ptr<BER_CONTAINER>(new ImplicitNullType(ENDOFMIBVIEW));
+            return asn_new<ImplicitNullType>(ENDOFMIBVIEW);
 
-        // devired
         case NETWORK_ADDRESS:
-            return std::shared_ptr<BER_CONTAINER>(new NetworkAddress());
+            return asn_new<NetworkAddress>();
         case TIMESTAMP:
-            return std::shared_ptr<BER_CONTAINER>(new TimestampType());
+            return asn_new<TimestampType>();
         case COUNTER32:
-            return std::shared_ptr<BER_CONTAINER>(new Counter32());
+            return asn_new<Counter32>();
         case GAUGE32:
-            return std::shared_ptr<BER_CONTAINER>(new Gauge());
+            return asn_new<Gauge>();
         case COUNTER64:
-            return std::shared_ptr<BER_CONTAINER>(new Counter64());
+            return asn_new<Counter64>();
         case OPAQUE:
-            return std::shared_ptr<BER_CONTAINER>(new OpaqueType());
+            return asn_new<OpaqueType>();
 
-        // Complex
-        /* OPAQUE = 0x44 */
         case STRUCTURE:
 
         case GetRequestPDU:
@@ -254,10 +323,9 @@ std::shared_ptr<BER_CONTAINER> ComplexType::createObjectForType(ASN_TYPE valueTy
         case SetRequestPDU:
         case GetBulkRequestPDU:
 
-        //case TrapPDU: // should never get v1trap, but put it in anyway
         case InformRequestPDU:
         case Trapv2PDU:
-            return std::shared_ptr<BER_CONTAINER>(new ComplexType(valueType));
+            return asn_new<ComplexType>(valueType);
         default:
             return nullptr;
     }
@@ -266,29 +334,40 @@ std::shared_ptr<BER_CONTAINER> ComplexType::createObjectForType(ASN_TYPE valueTy
 int ComplexType::fromBuffer(const uint8_t *buf, size_t max_len){
     int j = BER_CONTAINER::fromBuffer(buf, max_len);
     CHECK_DECODE_ERR(j);
-    const uint8_t* ptr = buf + j;
 
-    size_t i = 1;
-    while(i < (size_t)_length && i <= max_len){
+    if(static_cast<size_t>(j + _length) > max_len) return SNMP_BUFFER_ERROR_MAX_LEN_EXCEEDED;
+
+    const uint8_t* ptr = buf + j;
+    size_t outer_used = static_cast<size_t>(j);
+
+    this->_ownsChildren = true;  /* children are new'd here; we own them */
+
+    int remaining = _length;
+    while(remaining > 0){
         ASN_TYPE valueType = (ASN_TYPE)*ptr;
 
-        auto newObj = ComplexType::createObjectForType(valueType);
+        if(this->valuesLen >= SNMP_MAX_COMPLEX_CHILDREN) {
+            return SNMP_BUFFER_ERROR_UNKNOWN_TYPE;   /* too many VBs; well-defined error */
+        }
+
+        BER_CONTAINER* newObj = ComplexType::createObjectForType(valueType);
         if(!newObj){
             SNMP_LOGD("Couldn't create object of type: %d\n", valueType);
             return SNMP_BUFFER_ERROR_UNKNOWN_TYPE;
         }
 
-        int used_length = newObj->fromBuffer(ptr, max_len - i);
+        int used_length = newObj->fromBuffer(ptr, max_len - outer_used);
         if(used_length < 0){
-            // Problem de-serialising
+            asn_delete(newObj);
             SNMP_LOGD("Problem deserialising structure of type: %d\n", valueType);
             return SNMP_BUFFER_ERROR_PROBLEM_DESERIALISING;
         }
 
-        addValueToList(newObj);
+        this->values[this->valuesLen++] = newObj;
 
-        ptr += used_length; 
-        i += used_length;
+        ptr += used_length;
+        remaining -= used_length;
+        outer_used += static_cast<size_t>(used_length);
     }
-    return _length + j;
+    return j + _length;
 }

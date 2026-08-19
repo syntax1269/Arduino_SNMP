@@ -1,21 +1,20 @@
 #include "include/SNMPParser.h"
-#include <string>
 
-static SNMP_PERMISSION getPermissionOfRequest(const SNMPPacket& request, const std::string& _community, const std::string& _readOnlyCommunity){
+static SNMP_PERMISSION getPermissionOfRequest(const SNMPPacket& request, const char* _community, const char* _readOnlyCommunity){
     SNMP_PERMISSION requestPermission = SNMP_PERM_NONE;
-    SNMP_LOGD("community string in packet: %s\n", request.communityString.c_str());
+    SNMP_LOGD("community string in packet: %s\n", request.communityString);
 
-    if(!_readOnlyCommunity.empty() && _readOnlyCommunity == request.communityString) { // snmprequest->version != 1
+    if(_readOnlyCommunity[0] != 0 && strcmp(_readOnlyCommunity, request.communityString) == 0) {
         requestPermission = SNMP_PERM_READ_ONLY;
     }
 
-    if(_community == request.communityString) { // snmprequest->version != 1
+    if(strcmp(_community, request.communityString) == 0) {
         requestPermission = SNMP_PERM_READ_WRITE;
     }
     return requestPermission;
 }
 
-SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* responseLength, int max_packet_size, std::deque<ValueCallback*> &callbacks, const std::string& _community, const std::string& _readOnlyCommunity, informCB informCallback, void* ctx){
+SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* responseLength, int max_packet_size, ValueCallback* const *callbacks, int callbacksCount, const char* _community, const char* _readOnlyCommunity, informCB informCallback, void* ctx){
     SNMPPacket request;
 
     SNMP_PACKET_PARSE_ERROR parseResult = request.parseFrom(buffer, packetLength);
@@ -38,14 +37,14 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
 
     SNMP_PERMISSION requestPermission = getPermissionOfRequest(request, _community, _readOnlyCommunity);
     if(requestPermission == SNMP_PERM_NONE){
-        SNMP_LOGW("Invalid communitystring provided: %s, no response to give\n", request.communityString.c_str());
+        SNMP_LOGW("Invalid communitystring provided: %s, no response to give\n", request.communityString);
         return SNMP_REQUEST_INVALID_COMMUNITY;
     }
-    
-    // this will take the required stuff from request - like requestID and community string etc
+
     SNMPResponse response = SNMPResponse(request);
 
-    std::deque<VarBind> outResponseList;
+    VarBind outResponseList[SNMP_MAX_VARBINDS];
+    int outResponseCount = 0;
 
     bool pass = false;
     SNMP_ERROR_RESPONSE handleStatus = SNMP_NO_ERROR;
@@ -54,7 +53,7 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
     switch(request.packetPDUType){
         case GetRequestPDU:
         case GetNextRequestPDU:
-            pass = handleGetRequestPDU(callbacks, request.varbindList, outResponseList, request.snmpVersion, request.packetPDUType == GetNextRequestPDU);
+            pass = handleGetRequestPDU(callbacks, callbacksCount, request.varbindList, request.varbindCount, outResponseList, outResponseCount, request.snmpVersion, request.packetPDUType == GetNextRequestPDU);
             handleStatus = request.packetPDUType == GetRequestPDU ? SNMP_GET_OCCURRED : SNMP_GETNEXT_OCCURRED;
         break;
         case GetBulkRequestPDU:
@@ -63,7 +62,7 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
                 pass = false;
                 globalError = GEN_ERR;
             } else {
-                pass = handleGetBulkRequestPDU(callbacks, request.varbindList, outResponseList, request.errorStatus.nonRepeaters, request.errorIndex.maxRepititions);
+                pass = handleGetBulkRequestPDU(callbacks, callbacksCount, request.varbindList, request.varbindCount, outResponseList, outResponseCount, request.errorStatus.nonRepeaters, request.errorIndex.maxRepititions);
                 handleStatus = SNMP_GETBULK_OCCURRED;
             }
         break;
@@ -73,7 +72,7 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
                 pass = false;
                 globalError = NO_ACCESS;
             } else {
-                pass = handleSetRequestPDU(callbacks, request.varbindList, outResponseList, request.snmpVersion);
+                pass = handleSetRequestPDU(callbacks, callbacksCount, request.varbindList, request.varbindCount, outResponseList, outResponseCount, request.snmpVersion);
                 handleStatus = SNMP_SET_OCCURRED;
             }
         break;
@@ -85,7 +84,8 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
     }
 
     if(pass){
-        for(const auto& item : outResponseList){
+        for(int idx = 0; idx < outResponseCount; idx++){
+            const VarBind& item = outResponseList[idx];
             if(item.errorStatus != NO_ERROR){
                 response.addErrorResponse(item);
             } else {
@@ -93,7 +93,6 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
             }
         }
     } else {
-        // Something went wrong, generic error response
         SNMP_LOGD("Handled error when building request, error: %d, sending error PDU", globalError);
         response.setGlobalError(globalError, 0, true);
         handleStatus = SNMP_ERROR_PACKET_SENT;
