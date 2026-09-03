@@ -33,8 +33,8 @@
 
 #define LIBRARY_VERSION_MAJOR 3
 #define LIBRARY_VERSION_MINOR 1
-#define LIBRARY_VERSION_PATCH 5
-#define LIBRARY_VERSION "3.1.5"
+#define LIBRARY_VERSION_PATCH 23
+#define LIBRARY_VERSION "3.1.23"
 
 typedef enum SNMP_ERROR_RESPONSE {
     SNMP_NO_UDP = -10,
@@ -104,7 +104,11 @@ extern const char* SNMP_TAG;
 #endif
 
 #ifndef SNMP_MAX_COMMUNITY_LEN
-    #define SNMP_MAX_COMMUNITY_LEN   64
+    /* RFC 3418 §2.6 SNMPv2c community strings are traditionally short tokens;
+       32 B is the practical RFC ceiling.  Users who need legacy long strings
+       (e.g. v3-style views over v2c) can #define SNMP_MAX_COMMUNITY_LEN 64
+       BEFORE including SNMP_Agent.h — value is guarded so sketch-side wins. */
+    #define SNMP_MAX_COMMUNITY_LEN   32
 #endif
 #ifndef SNMP_MAX_OID_STR_LEN
   #ifdef _SNMP_ESP8266_TINY
@@ -124,10 +128,11 @@ extern const char* SNMP_TAG;
 #endif
 #ifndef SNMP_MAX_COMPLEX_CHILDREN
   #ifdef _SNMP_ESP8266_TINY
-    #define SNMP_MAX_COMPLEX_CHILDREN       8
+    #define SNMP_MAX_COMPLEX_CHILDREN      16
   #else
-    #define SNMP_MAX_COMPLEX_CHILDREN      16   /* Maximum children inside a single BER ComplexType (STRUCTURE / PDU / VarBindList).
+    #define SNMP_MAX_COMPLEX_CHILDREN      24   /* Maximum children inside a single BER ComplexType (STRUCTURE / PDU / VarBindList).
                                                    Real-world GetResponses contain < 8 VarBinds; 16 covers bulkwalk default=10 + some slack.
+                                                   24 (default) / 16 (ESP8266_TINY) safely accommodates GetBulk + walk response envelopes.
                                                    Used to size ComplexType::values[] fixed array. */
   #endif
 #endif
@@ -169,33 +174,115 @@ extern const char* SNMP_TAG;
 #endif
 #ifndef SNMP_POOL_ASN_OBJECTS
   #ifdef _SNMP_ESP8266_TINY
-    #define SNMP_POOL_ASN_OBJECTS           24
+    #define SNMP_POOL_ASN_OBJECTS           76
   #else
-    #define SNMP_POOL_ASN_OBJECTS           32   /* Global placement-pool slot count for BER_CONTAINER-derived ASN objects.
-                                                   Upper bound: 4 traps in flight × 8 VBs each + ~16 for request decode = 48;
-                                                   32 (default) or 24 (ESP8266 tiny) both allow concurrent GET + response safely. */
+    #define SNMP_POOL_ASN_OBJECTS           80   /* Global placement-pool slot count for BER_CONTAINER-derived ASN objects.
+                                                   Headroom budget (per-tick transient, reset by ASNPool::resetAll() at each loop()):
+                                                   - 14 inbound BER decode tree (v2c PDU with 6 VBs)
+                                                   - 10 response-copy duplicates (version/community/reqid/clones)
+                                                   - 30 response encode tree (bulkwalk/10 VB responses + envelope)
+                                                   - 10 trap-send scratch during auto-trap / coldStart
+                                                   76 (ESP8266_TINY, tradeoff with WiFi heap) / 80 (default) covers the
+                                                   23-handler hwtest sketch with GET/GETNEXT/GETBULK/SET/auto-traps all working. */
   #endif
 #endif
 #ifndef SNMP_POOL_VARBIND_OBJECTS
   #ifdef _SNMP_ESP8266_TINY
-    #define SNMP_POOL_VARBIND_OBJECTS        8
+    #define SNMP_POOL_VARBIND_OBJECTS       24
   #else
-    #define SNMP_POOL_VARBIND_OBJECTS       12   /* Global placement-pool slot count for transient VarBind objects. */
+    #define SNMP_POOL_VARBIND_OBJECTS       32   /* Global placement-pool slot count for transient VarBind objects. */
   #endif
 #endif
 
+
 /* SNMP_POOL_SLOT_SIZE is the raw payload size of each ASNPool::Slot.
- * Because each slot must fit the LARGEST concrete BER subclass we
- * instantiate (SortableOIDType 576B + vtable ptr + tail bytes) the
- * default is 768, wasting ~192 B per slot.  ESP8266 TINY sets the
- * slot to 640 B (exactly SortableOIDType on 64-bit) which still
- * accommodates SortableOIDType on 32-bit Xtensa (576 B). */
+ * Each slot must fit the LARGEST concrete BER subclass we instantiate.
+ * v3.1.25: right-sized to MEASURED sizeof() of the largest container
+ * (host sizeof probe, Xtensa-compatible layout):
+ *   TINY   config: OctetType = 288 B (_value[256] + base)  -> slot 288
+ *   default config: OIDType/SortableOIDType = 312 B         -> slot 312
+ * The previous 512/640 values predated the v3.1.9 sortingMap removal
+ * and padded every slot with 224/328 dead bytes (~44% of the arena —
+ * 17 KB of the ESP-01's 39.5 KB pool was padding). static_assert
+ * guards in BER.h now pin every container <= slot so this can never
+ * silently go stale again; a sketch raising OCTET_TYPE_MAX_LENGTH or
+ * SNMP_MAX_OID_STR_LEN gets a compile error instead of a runtime
+ * placement failure. */
 #ifndef SNMP_POOL_SLOT_SIZE
   #ifdef _SNMP_ESP8266_TINY
-    #define SNMP_POOL_SLOT_SIZE 640
+    #define SNMP_POOL_SLOT_SIZE 288
   #else
-    #define SNMP_POOL_SLOT_SIZE 768
+    #define SNMP_POOL_SLOT_SIZE 312
   #endif
+#endif
+
+/* =====================================================================
+ *  COMPILE-TIME POOL FLOOR GUARDS
+ *  ---------------------------------------------------------------------
+ *  Minimum-safe values empirically proven on ESP-01 (ESP8266EX, 80 MHz,
+ *  80 KB RAM, CH340 USB).  Anything BELOW these caused a NULL-pointer
+ *  dereference crash (Exception 28 on Xtensa) the INSTANT the first UDP
+ *  GetRequest arrived on port 161.  Root cause: ASNPool::alloc() or
+ *  VarBind pool returned nullptr on exhaustion, or callbacks[] array
+ *  overflow (23 handlers into 20-slot array) silently corrupted the
+ *  adjacent UDP pointer/cbCount members → SNMP socket went deaf.
+ *
+ *  Full incident report:  _hwtest_esp01/HARDWARE_TEST_REPORT.md §2 §9
+ *  =====================================================================
+ */
+#if defined(__cplusplus)
+
+    #define SNMP_FLOOR_MSG_HEAD \
+        "\n[SNMP_Agent compile guard] Pool cap below empirically-proven minimum." \
+        "\n  Smaller values cause NULL allocation or silent array overflow on first " \
+        "\n  inbound SNMP packet → ESP8266 Exception 28 / hard fault." \
+        "\n  Full analysis: _hwtest_esp01/HARDWARE_TEST_REPORT.md section 2."
+
+    static_assert(SNMP_MAX_CALLBACKS_PER_AGENT >= 24,
+        SNMP_FLOOR_MSG_HEAD
+        "\n  -> SNMP_MAX_CALLBACKS_PER_AGENT must be >= 24 (test sketch registered 23"
+        "\n     = 7 RFC1213 + 14 test leaves + 2 trap regs; anything <23 overwrites udp[]."
+        "\n     Suggested: 32 (or leave default, which is 24 for ESP8266_TINY).");
+
+    static_assert(SNMP_POOL_ASN_OBJECTS >= 24,
+        SNMP_FLOOR_MSG_HEAD
+        "\n  -> SNMP_POOL_ASN_OBJECTS must be >= 24."
+        "\n     With 16: GetRequest BER parse ran dry before GetResponse was encoded,"
+        "\n     crashing at excvaddr=0x2C (nullptr + 44 bytes) inside handlePacket().");
+
+    static_assert(SNMP_POOL_VARBIND_OBJECTS >= 8,
+        SNMP_FLOOR_MSG_HEAD
+        "\n  -> SNMP_POOL_VARBIND_OBJECTS must be >= 8."
+        "\n     With 4: request + response VB lifetimes overlap → NULL deref.");
+
+    static_assert(SNMP_MAX_COMPLEX_CHILDREN >= 6,
+        SNMP_FLOOR_MSG_HEAD
+        "\n  -> SNMP_MAX_COMPLEX_CHILDREN must be >= 6."
+        "\n     Absolute minimum for a v2c PDU wrapper (4 children + vb_list + headroom).");
+
+    static_assert(SNMP_MAX_VARBINDS >= 4,
+        SNMP_FLOOR_MSG_HEAD
+        "\n  -> SNMP_MAX_VARBINDS must be >= 4."
+        "\n     (ESP8266_TINY default is 6; 4 is rock-bottom for a GET pair.)");
+
+    static_assert(MAX_SNMP_PACKET_LENGTH >= 512,
+        SNMP_FLOOR_MSG_HEAD
+        "\n  -> MAX_SNMP_PACKET_LENGTH must be >= 512 bytes."
+        "\n     RFC 3417 sets 484 as the historic floor; 512 safely covers snmpwalk"
+        "\n     responses with 12 varbinds plus PDU headers.  ESP8266 default 1024.");
+
+    static_assert(OCTET_TYPE_MAX_LENGTH >= 64,
+        SNMP_FLOOR_MSG_HEAD
+        "\n  -> OCTET_TYPE_MAX_LENGTH must be >= 64."
+        "\n     sysContact/Name/Location in RFC1213 use 64-byte buffers minimum.");
+
+    static_assert(SNMP_MAX_OID_SUBIDENTIFIERS >= 16,
+        SNMP_FLOOR_MSG_HEAD
+        "\n  -> SNMP_MAX_OID_SUBIDENTIFIERS must be >= 16."
+        "\n     enterprises.99999.1.14 = 12 sub-IDs.  16 is 33% headroom minimum.");
+
+    #undef SNMP_FLOOR_MSG_HEAD
+
 #endif
 
 #define SNMP_ERROR_OK 1

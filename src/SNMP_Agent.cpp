@@ -5,12 +5,12 @@ SNMPAgent* SNMPAgent::agents[SNMP_MAX_AGENTS] = {nullptr};
 int SNMPAgent::agentsCount = 0;
 
 void SNMPAgent::setUDP(UDP* udp){
-    if(this->udpCount < SNMP_MAX_UDP_PER_AGENT){
-        this->_udp[this->udpCount++] = udp;
-
-
+    if(this->udpCount >= SNMP_MAX_UDP_PER_AGENT){
+        SNMP_LOGE("setUDP: _udp[] full (%d slots). Raise SNMP_MAX_UDP_PER_AGENT.\n", SNMP_MAX_UDP_PER_AGENT);
+        this->begin();
+        return;
     }
-
+    this->_udp[this->udpCount++] = udp;
     this->begin();
 }
 
@@ -33,14 +33,14 @@ void SNMPAgent::stop(){
 }
 
 SNMP_ERROR_RESPONSE SNMPAgent::loop(){
-
+    ASNPool::resetAll();
 
     for(int i = 0; i < udpCount; i++){
         UDP* udp = _udp[i];
         int packetLength = udp->parsePacket();
         if(packetLength > 0){
-            SNMP_LOGD("Received packet from: %s, of size: %d", udp->remoteIP().toString().c_str(), packetLength);
-
+            SNMP_LOGI("loop: UDP[%d] parsePacket=%d bytes remote=%s:%d\n",
+                      i, packetLength, udp->remoteIP().toString().c_str(), udp->remotePort());
 
             if(packetLength < 0 || packetLength > MAX_SNMP_PACKET_LENGTH){
                 SNMP_LOGW("Incoming packet too large: %d\n", packetLength);
@@ -54,22 +54,20 @@ SNMP_ERROR_RESPONSE SNMPAgent::loop(){
                 SNMP_LOGW("Packet length mismatch: expected: %d, actual: %d\n", packetLength, readBytes);
                 return SNMP_REQUEST_INVALID;
             }
-
+            SNMP_LOGI("loop: UDP[%d] read OK. Calling handlePacket(len=%d)...\n", i, packetLength);
 
             int responseLength = 0;
             SNMP_ERROR_RESPONSE response = handlePacket(_packetBuffer, packetLength, &responseLength, MAX_SNMP_PACKET_LENGTH, callbacks, callbacksCount, _community, _readOnlyCommunity, informCallback, (void*)this);
-
+            SNMP_LOGI("loop: handlePacket -> ret=%d, responseLength=%d\n", (int)response, responseLength);
             if(response > 0 && response != SNMP_INFORM_RESPONSE_OCCURRED){
-                SNMP_LOGD("Built packet, sending back response to: %s, %d\n", udp->remoteIP().toString().c_str(), udp->remotePort());
-
+                SNMP_LOGI("loop: UDP TX beginPacket(remote=%s:%d) write=%d B ...",
+                          udp->remoteIP().toString().c_str(), udp->remotePort(), responseLength);
                 udp->beginPacket(udp->remoteIP(), udp->remotePort());
                 udp->write(_packetBuffer, responseLength);
+                bool ep = udp->endPacket();
+                SNMP_LOGI(" done. endPacket=%d\n", (int)ep);
 
-
-
-
-
-                if(!udp->endPacket()){
+                if(!ep){
                     SNMP_LOGW("Failed to send response packet\n");
                 }
             }
@@ -217,15 +215,15 @@ ValueCallback* SNMPAgent::addGaugeHandler(const char *oid, uint32_t* value, bool
 }
 
 ValueCallback * SNMPAgent::addHandler(ValueCallback *callback, bool isSettable) {
-
+    if(!callback) return nullptr;
     callback->isSettable = isSettable;
-    if(this->callbacksCount < SNMP_MAX_CALLBACKS_PER_AGENT){
-        this->callbacks[this->callbacksCount++] = callback;
-
-
-
+    if(this->callbacksCount >= SNMP_MAX_CALLBACKS_PER_AGENT){
+        SNMP_LOGE("addHandler: callbacks[] full (%d slots), OID %s NOT registered. Raise SNMP_MAX_CALLBACKS_PER_AGENT.\n",
+                  SNMP_MAX_CALLBACKS_PER_AGENT, callback->OID ? callback->OID->string() : "(null)");
+        delete callback;
+        return nullptr;
     }
-
+    this->callbacks[this->callbacksCount++] = callback;
     return callback;
 }
 
@@ -238,19 +236,19 @@ bool SNMPAgent::sortHandlers(){
     return true;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+void SNMPAgent::printAllOIDsTo(Print& out) const {
+    char line[SNMP_MAX_OID_STR_LEN + 32];
+    for(int i = 0; i < this->callbacksCount; i++){
+        const ValueCallback* cb = this->callbacks[i];
+        if(!cb || !cb->OID) continue;
+        const char* oidStr = cb->OID->string();
+        const char* typeStr = ValueCallback::getTypeName(cb->type);
+        const char* tagStr = cb->getAccessTag();
+        snprintf(line, sizeof(line), "[%2d] %s  %-10s %s\r\n",
+                 i, oidStr, typeStr, tagStr);
+        out.print(line);
+    }
+}
 
 snmp_request_id_t SNMPAgent::sendTrapTo(SNMPTrap* trap, const IPAddress& ip, bool replaceQueuedRequests, int retries, int delay_ms){
     return queue_and_send_trap(this->informList, this->informCount, trap, ip, replaceQueuedRequests, retries, delay_ms);
@@ -276,15 +274,15 @@ void SNMPAgent::markTrapDeleted(SNMPTrap* trap){
 }
 
 bool SNMPAgent::restartUDP() {
-
+    bool all_ok = true;
     for(int i = 0; i < udpCount; i++){
         _udp[i]->stop();
-        _udp[i]->begin(AgentUDPport);
-
-
-
-
-
+        uint8_t ok = _udp[i]->begin(AgentUDPport);
+        if(!ok){
+            SNMP_LOGE("restartUDP: UDP[%d]->begin(port=%d) FAILED (returned 0). WiFi down? port already bound? check port permissions.\n",
+                      i, (int)AgentUDPport);
+            all_ok = false;
+        }
     }
-    return true;
+    return all_ok;
 }
