@@ -33,7 +33,7 @@ class SNMPAgent {
             if(SNMPAgent::agentsCount < SNMP_MAX_AGENTS){
                 SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
             }
-        };
+        }
 
         SNMPAgent(const char* community){
             size_t len = strlen(community);
@@ -43,7 +43,7 @@ class SNMPAgent {
             if(SNMPAgent::agentsCount < SNMP_MAX_AGENTS){
                 SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
             }
-        };
+        }
 
         SNMPAgent(const char* readOnlyCommunity, const char* readWriteCommunity){
             size_t len = strlen(readWriteCommunity);

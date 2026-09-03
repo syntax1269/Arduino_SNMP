@@ -1,4 +1,4 @@
-build/testbuild/../src/SNMPParser.cpp.o: ../src/SNMPParser.cpp \
+build/build/../src/SNMPParser.cpp.o: ../src/SNMPParser.cpp \
   ../src/include/SNMPParser.h ../src/include/defs.h \
   ../src/include/SNMPPacket.h ../src/include/VarBinds.h \
   ../src/include/BER.h ../tests/required/IPAddress.h \
