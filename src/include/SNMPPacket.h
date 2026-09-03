@@ -36,7 +36,7 @@ union ErrorIndex {
 
 class SNMPPacket {
   public:
-    SNMPPacket(){};
+    SNMPPacket(){}
     explicit SNMPPacket(const SNMPPacket& packet){
         this->setRequestID(packet.requestID);
         this->setVersion(packet.snmpVersion);
@@ -60,7 +60,7 @@ class SNMPPacket {
          * initializers: varbindCount=0 + default-constructed VarBind
          * slots) because callers (e.g. SNMPResponse copy-from-request)
          * populate the response via addResponse() calls. */
-    };
+    }
 
     virtual ~SNMPPacket();
 
@@ -151,6 +151,10 @@ class SNMPPacket {
     
   protected:
     virtual bool build();
+
+    typedef bool (*BuildPDUHeaderFn)(ComplexType* snmpPDU, void* userdata);
+
+    bool _build_pdu_envelope(BuildPDUHeaderFn fill_pdu, void* userdata);
 
     virtual std::shared_ptr<ComplexType> generateVarBindList();
 

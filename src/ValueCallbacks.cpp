@@ -3,6 +3,17 @@
 
 #include <algorithm>
 
+template <typename T>
+static void pool_asn_deleter(T* p) noexcept {
+    asn_delete(static_cast<BER_CONTAINER*>(p));
+}
+
+template <typename T>
+static inline std::shared_ptr<T> pool_shared(T* p) noexcept {
+    if(!p) return nullptr;
+    return std::shared_ptr<T>(p, pool_asn_deleter<T>);
+}
+
 #define ASSERT_VALID_VALUE(value) if(!value) return nullptr;
 
 #define SETTING_NON_SETTABLE_ERROR READ_ONLY
@@ -13,6 +24,21 @@
 // If we ever remove the setting pre-check, use this
 // #define ASSERT_CALLBACK_SETTABLE if(!(static_cast<ValueCallback*>(this)->isSettable)) return SETTING_NON_SETTABLE_ERROR;
 #define ASSERT_CALLBACK_SETTABLE()
+
+const char* ValueCallback::getTypeName(ASN_TYPE t) noexcept {
+    switch(t){
+        case INTEGER:    return "Integer";
+        case STRING:     return "String";
+        case NULLTYPE:   return "Null";
+        case ASN_TYPE::OID: return "OID";
+        case COUNTER32:  return "Counter32";
+        case GAUGE32:    return "Gauge32";
+        case TIMESTAMP:  return "Timestamp";
+        case OPAQUE:     return "Opaque";
+        case COUNTER64:  return "Counter64";
+        default:         return "Unknown";
+    }
+}
 
 ValueCallback* ValueCallback::findCallback(ValueCallback* const *callbacks, int callbacksCount, const OIDType* const oid, bool walk, int startAt, int *foundAt){
     bool useNext = false;
@@ -61,10 +87,10 @@ SNMP_ERROR_STATUS ValueCallback::setValueForCallback(ValueCallback* callback, co
         return SETTING_NON_SETTABLE_ERROR;
     }
 
+    callback->setOccurred = true;
     SNMP_ERROR_STATUS valid = callback->setTypeWithValue(value.get());
-
-    if(valid == NO_ERROR){
-        callback->setOccurred = true;
+    if(valid != NO_ERROR){
+        callback->setOccurred = false;
     }
 
     return valid;
@@ -73,9 +99,9 @@ SNMP_ERROR_STATUS ValueCallback::setValueForCallback(ValueCallback* callback, co
 std::shared_ptr<BER_CONTAINER> IntegerCallback::buildTypeWithValue(){
     ASSERT_VALID_VALUE(this->value);
 
-    auto val = std::make_shared<IntegerType>(*this->value);
+    auto val = pool_shared(asn_new<IntegerType>(*this->value));
+    if(!val) return nullptr;
     if(this->modifier != 0){
-        // Apple local division if callback was asked to
         val->_value /= this->modifier;
     }
     return val;
@@ -98,7 +124,7 @@ SNMP_ERROR_STATUS IntegerCallback::setTypeWithValue(BER_CONTAINER* rawValue){
 std::shared_ptr<BER_CONTAINER> TimestampCallback::buildTypeWithValue(){
     ASSERT_VALID_VALUE(this->value);
 
-    return std::make_shared<TimestampType>(*this->value);
+    return pool_shared(asn_new<TimestampType>(*this->value));
 }
 
 SNMP_ERROR_STATUS TimestampCallback::setTypeWithValue(BER_CONTAINER* rawValue){
@@ -114,7 +140,7 @@ SNMP_ERROR_STATUS TimestampCallback::setTypeWithValue(BER_CONTAINER* rawValue){
 std::shared_ptr<BER_CONTAINER> StringCallback::buildTypeWithValue(){
     ASSERT_VALID_VALUE(this->value);
 
-    return std::make_shared<OctetType>(*this->value);
+    return pool_shared(asn_new<OctetType>(*this->value));
 }
 
 SNMP_ERROR_STATUS StringCallback::setTypeWithValue(BER_CONTAINER* rawValue){
@@ -129,14 +155,14 @@ SNMP_ERROR_STATUS StringCallback::setTypeWithValue(BER_CONTAINER* rawValue){
 }
 
 std::shared_ptr<BER_CONTAINER> ReadOnlyStringCallback::buildTypeWithValue(){
-    return std::make_shared<OctetType>(this->value);
+    return pool_shared(asn_new<OctetType>(this->value));
 }
 
 
 std::shared_ptr<BER_CONTAINER> OpaqueCallback::buildTypeWithValue(){
     ASSERT_VALID_VALUE(this->value);
 
-    return std::make_shared<OpaqueType>(this->value, this->data_len);
+    return pool_shared(asn_new<OpaqueType>(this->value, this->data_len));
 }
 
 SNMP_ERROR_STATUS OpaqueCallback::setTypeWithValue(BER_CONTAINER* rawValue){
@@ -152,15 +178,15 @@ SNMP_ERROR_STATUS OpaqueCallback::setTypeWithValue(BER_CONTAINER* rawValue){
 }
 
 std::shared_ptr<BER_CONTAINER> OIDCallback::buildTypeWithValue(){
-    auto oid = std::make_shared<OIDType>(this->value);
-    if(!oid->valid) return nullptr;
+    auto oid = pool_shared(asn_new<OIDType>(this->value));
+    if(!oid || !oid->valid) return nullptr;
     return oid;
 }
 
 std::shared_ptr<BER_CONTAINER> Counter32Callback::buildTypeWithValue(){
     ASSERT_VALID_VALUE(this->value);
 
-    return std::make_shared<Counter32>(*this->value);
+    return pool_shared(asn_new<Counter32>(*this->value));
 }
 
 SNMP_ERROR_STATUS Counter32Callback::setTypeWithValue(BER_CONTAINER* rawValue){
@@ -168,14 +194,19 @@ SNMP_ERROR_STATUS Counter32Callback::setTypeWithValue(BER_CONTAINER* rawValue){
     ASSERT_VALID_SETTABLE_VALUE(this->value);
 
     Counter32* val = static_cast<Counter32*>(rawValue);
-    *this->value = val->_value;
+    uint32_t incoming = (uint32_t)val->_value;
+    if(*this->value != incoming){
+        *this->value = incoming;
+    } else {
+        this->setOccurred = false;
+    }
     return NO_ERROR;
 }
 
 std::shared_ptr<BER_CONTAINER> Gauge32Callback::buildTypeWithValue(){
     ASSERT_VALID_VALUE(this->value);
 
-    return std::make_shared<Gauge>(*this->value);
+    return pool_shared(asn_new<Gauge>(*this->value));
 }
 
 SNMP_ERROR_STATUS Gauge32Callback::setTypeWithValue(BER_CONTAINER* rawValue){
@@ -191,7 +222,7 @@ SNMP_ERROR_STATUS Gauge32Callback::setTypeWithValue(BER_CONTAINER* rawValue){
 std::shared_ptr<BER_CONTAINER> Counter64Callback::buildTypeWithValue(){
     ASSERT_VALID_VALUE(this->value);
 
-    return std::make_shared<Counter64>(*this->value);
+    return pool_shared(asn_new<Counter64>(*this->value));
 }
 
 SNMP_ERROR_STATUS Counter64Callback::setTypeWithValue(BER_CONTAINER* rawValue){
@@ -199,29 +230,43 @@ SNMP_ERROR_STATUS Counter64Callback::setTypeWithValue(BER_CONTAINER* rawValue){
     ASSERT_VALID_SETTABLE_VALUE(this->value);
 
     Counter64* val = static_cast<Counter64*>(rawValue);
-    *this->value = val->_value;
-
+    if(*this->value != val->_value){
+        *this->value = val->_value;
+    } else {
+        this->setOccurred = false;
+    }
     return NO_ERROR;
 }
 
-bool SortableOIDType::sort_oids(SortableOIDType* oid1, SortableOIDType* oid2){
-    const uint32_t* map1 = oid1->sortingMap;
-    const uint32_t* map2 = oid2->sortingMap;
-    int len1 = oid1->sortingMapLen;
-    int len2 = oid2->sortingMapLen;
+bool SortableOIDType::sort_oids(const SortableOIDType* oid1, const SortableOIDType* oid2){
+    if(!oid1 || !oid2) return false;
+    if(oid1->dataLen == 0) return false;
+    if(oid2->dataLen == 0) return true;
 
-    if(len1 == 0) return false;
-    if(len2 == 0) return true;
+    const uint8_t* p1 = oid1->data;
+    const uint8_t* p2 = oid2->data;
+    int rem1 = oid1->dataLen;
+    int rem2 = oid2->dataLen;
 
-    int i = (len1 < len2) ? len1 : len2;
-
-    for(int j = 0; j < i; j++){
-        if(map1[j] != map2[j]){
-            return map1[j] < map2[j];
-        }
+    while(rem1 > 0 && rem2 > 0){
+        long sub1 = 0;
+        long sub2 = 0;
+        int consumed1 = 0;
+        int consumed2 = 0;
+        do {
+            sub1 = (sub1 << 7) | (*p1 & 0x7F);
+            consumed1++;
+        } while(rem1-- > 0 && (*p1++ & 0x80) != 0);
+        do {
+            sub2 = (sub2 << 7) | (*p2 & 0x7F);
+            consumed2++;
+        } while(rem2-- > 0 && (*p2++ & 0x80) != 0);
+        (void)consumed1; (void)consumed2;
+        if(sub1 != sub2) return sub1 < sub2;
     }
-
-    return len1 < len2;
+    if(rem1 > 0) return false;
+    if(rem2 > 0) return true;
+    return false;
 }
 
 bool compare_callbacks (const ValueCallback* first, const ValueCallback* second){

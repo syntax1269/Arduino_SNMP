@@ -27,7 +27,7 @@ class SNMPTrap : public SNMPPacket {
         this->setVersion(version);
         this->setPDUType(Trapv2PDU);
         this->setCommunityString(community);
-    };
+    }
     virtual ~SNMPTrap();
     
     IPAddress agentIP;
@@ -59,7 +59,21 @@ class SNMPTrap : public SNMPPacket {
     }
     
     void setTrapOID(OIDType* oid){
+        if(_trapOIDOwned) asn_delete(trapOID);
         trapOID = oid;
+        _trapOIDOwned = false;
+    }
+
+    void setTrapOID(const char* oid_str){
+        if(_trapOIDOwned) asn_delete(trapOID);
+        trapOID = asn_new<OIDType>(oid_str);
+        _trapOIDOwned = true;
+    }
+
+    void setTrapOID(const OIDType& oid_ref){
+        if(_trapOIDOwned) asn_delete(trapOID);
+        trapOID = oid_ref.cloneRaw();
+        _trapOIDOwned = true;
     }
     
     void setSpecificTrap(short num){
@@ -86,7 +100,7 @@ class SNMPTrap : public SNMPPacket {
         uptimeCallback = uptime;
     }
     
-    void addOIDPointer(ValueCallback* callback);
+    bool addOIDPointer(ValueCallback* callback);
     
     UDP* _udp = nullptr;
 
@@ -101,6 +115,8 @@ class SNMPTrap : public SNMPPacket {
     }
 
     bool sendTo(const IPAddress& ip, bool skipBuild = false){
+        ASNPool::resetAll();
+
         bool buildStatus = true;
         if(!skipBuild) {
             buildStatus = this->buildForSending();
@@ -132,6 +148,7 @@ class SNMPTrap : public SNMPPacket {
   protected:
     ValueCallback* callbacks[SNMP_MAX_CALLBACKS_PER_TRAP] = {nullptr};
     int callbacksCount = 0;
+    bool _trapOIDOwned = false;
 
     std::shared_ptr<ComplexType> generateVarBindList() override;
     ComplexType* generateVarBindListRaw() override;

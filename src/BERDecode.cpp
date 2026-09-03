@@ -1,4 +1,7 @@
 #include "include/BER.h"
+#ifdef COMPILING_TESTS
+    #include "tests/required/millis.h"   /* host shim: millis() -> 0 (real millis comes via Arduino.h) */
+#endif
 
 #ifndef SNMP_POOLS_IN_BSS
     /* Allocate the ASNPool storage once at startup (first asn_new call).
@@ -17,21 +20,62 @@
         slots = new Slot[SNMP_POOL_ASN_OBJECTS]();
         _poolsReady = true;
     }
+
+    /* v3.3.0: pre-allocate the arena at the earliest safe moment. Called from
+     * the SNMPAgent constructor (global-ctor time on Arduino sketches — before
+     * setup(), before WiFi) so the one contiguous arena is claimed while the
+     * heap is pristine. Same one-shot as _ensurePools, but no-throw: a failure
+     * here logs and leaves the lazy path armed instead of aborting the sketch
+     * (ESP8266 runs with exceptions disabled — a throwing new = abort). */
+    void ASNPool::lockInArena() {
+#if SNMP_POOL_LOCK_AT_BOOT
+        if(_poolsReady) return;
+        slots = new (std::nothrow) Slot[SNMP_POOL_ASN_OBJECTS]();
+        if(slots){
+            _poolsReady = true;
+            lockInMs = millis();
+            SNMP_LOGI("ASNPool: arena locked in at boot: %d slots x %d B = %d B, one contiguous block (ctor t=%lu ms)\n",
+                      (int)SNMP_POOL_ASN_OBJECTS, (int)sizeof(Slot),
+                      (int)(sizeof(Slot) * SNMP_POOL_ASN_OBJECTS), (unsigned long)lockInMs);
+        } else {
+            SNMP_LOGW("ASNPool: boot lock-in FAILED (heap too fragmented at ctor time) - falling back to lazy first-use allocation\n");
+        }
+#endif
+    }
 #else
     ASNPool::Slot ASNPool::slots[SNMP_POOL_ASN_OBJECTS] = {};
 #endif
 int ASNPool::usedCount = 0;
+int ASNPool::permCount = 0;
+int ASNPool::usedCountPeak = 0;
+bool ASNPool::permFrozen = false;
+uint32_t ASNPool::lockInMs = 0;
 
 void ASNPool::release(BER_CONTAINER* p){
     if(!p) return;
 #ifndef SNMP_POOLS_IN_BSS
     if(!_poolsReady) { delete p; return; }
 #endif
-    p->~BER_CONTAINER();
+    /* Double-release guard: without it, a double-destroyed object re-runs its
+     * destructor AND decrements usedCount twice. The counter then under-reports
+     * occupancy, rawAlloc() reuses a slot that still holds a live object, and
+     * live OIDs get corrupted — the root cause of degraded GetBulk responses
+     * and the "agent goes deaf" incidents (HARDWARE_TEST_REPORT.md §2/§9). */
     for(int i = 0; i < SNMP_POOL_ASN_OBJECTS; i++){
         if(static_cast<void*>(slots[i].storage) == static_cast<void*>(p)){
+            if(!slots[i].occupied){
+                /* Slot already free: second release of the same object.
+                 * Do NOT run the destructor again, do NOT decrement.
+                 * One-shot alarm when DEBUG>0: a caller is destroying twice. */
+                if(!slots[i].doubleReleaseWarned){
+                    slots[i].doubleReleaseWarned = true;
+                    SNMP_LOGE("ASNPool: DOUBLE RELEASE of slot %d detected (caller destroying an object twice)\n", i);
+                }
+                return;
+            }
+            p->~BER_CONTAINER();
             slots[i].occupied = false;
-            if(usedCount > 0) usedCount--;
+            usedCount--;
             return;
         }
     }
@@ -240,24 +284,6 @@ const char* OIDType::string() {
         }
     }
     return _valueStr;
-}
-
-void SortableOIDType::generateSortingMap(uint32_t outMap[SNMP_MAX_OID_SUBIDENTIFIERS], int* outLen) const {
-    int count = 0;
-
-    const uint8_t* ptr = this->data;
-
-    ptr += 1;
-    int i = this->dataLen - 1;
-
-    while(i > 0 && count < SNMP_MAX_OID_SUBIDENTIFIERS){
-        long item;
-        size_t len = decode_ber_longform_integer(ptr, &item, i);
-        ptr += len; i -= len;
-        outMap[count++] = (uint32_t)item;
-    }
-
-    *outLen = count;
 }
 
 int NullType::fromBuffer(const uint8_t *, size_t){
