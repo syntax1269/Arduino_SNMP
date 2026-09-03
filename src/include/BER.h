@@ -201,7 +201,7 @@ typedef int SNMP_BUFFER_ENCODE_ERROR;
 
 class BER_CONTAINER {
   public:
-    BER_CONTAINER(ASN_TYPE type) : _type(type){};
+    BER_CONTAINER(ASN_TYPE type) : _type(type){}
     virtual ~BER_CONTAINER()= default;
 
     ASN_TYPE _type;
@@ -221,10 +221,10 @@ class BER_CONTAINER {
 
 class NetworkAddress: public BER_CONTAINER {
   public:
-    NetworkAddress(): BER_CONTAINER(NETWORK_ADDRESS) {};
+    NetworkAddress(): BER_CONTAINER(NETWORK_ADDRESS) {}
     explicit NetworkAddress(const IPAddress& ip): NetworkAddress(){
         _value = ip;
-    };
+    }
 
     IPAddress _value = INADDR_NONE;
 
@@ -236,10 +236,10 @@ protected:
 
 class IntegerType: public BER_CONTAINER {
   public:
-    IntegerType(): BER_CONTAINER(INTEGER) {};
+    IntegerType(): BER_CONTAINER(INTEGER) {}
     explicit IntegerType(int value): IntegerType(){
         _value = value;
-    };
+    }
 
     int _value = 0;
 
@@ -252,10 +252,10 @@ class TimestampType: public IntegerType {
   public:
     TimestampType(): IntegerType(){
         _type = TIMESTAMP;
-    };
+    }
     explicit TimestampType(unsigned long value): IntegerType(value){
         _type = TIMESTAMP;
-    };
+    }
 };
 
 class OctetType: public BER_CONTAINER {
@@ -266,7 +266,7 @@ class OctetType: public BER_CONTAINER {
         memcpy(_value, value, len);
         _value[len] = 0;
         _valueLen = len;
-    };
+    }
     OctetType(const char* value, size_t len): BER_CONTAINER(STRING) {
         if(len > SNMP_MAX_STRING_LEN) len = SNMP_MAX_STRING_LEN;
         memcpy(_value, value, len);
@@ -281,7 +281,7 @@ protected:
     int serialise(uint8_t* buf, size_t max_len) override;
     int fromBuffer(const uint8_t *buf, size_t max_len) override;
 
-    OctetType(): BER_CONTAINER(STRING) { _value[0] = 0; };
+    OctetType(): BER_CONTAINER(STRING) { _value[0] = 0; }
     friend class ComplexType;
     template<typename U, typename... Args> friend U* asn_new(Args&&... args);
 };
@@ -310,7 +310,7 @@ protected:
 
     OpaqueType(): BER_CONTAINER(OPAQUE) {
         this->_dataLength = 0;
-    };
+    }
     friend class ComplexType;
     template<typename U, typename... Args> friend U* asn_new(Args&&... args);
 };
@@ -322,22 +322,22 @@ class OIDType: public BER_CONTAINER {
         size_t len = strlen(value);
         if(len > SNMP_MAX_OID_STR_LEN) len = SNMP_MAX_OID_STR_LEN;
         _init_from_cstr(value, len);
-    };
+    }
 
     template<size_t N>
     OIDType(const char (&value)[N]): BER_CONTAINER(OID) {
         constexpr size_t cap = ( (N-1) > SNMP_MAX_OID_STR_LEN ) ? SNMP_MAX_OID_STR_LEN : (N-1);
         _init_from_cstr(value, cap);
-    };
+    }
 
     std::shared_ptr<OIDType> cloneOID() const {
         return std::shared_ptr<OIDType>(asn_new<OIDType>(this->_valueStr, this->data, this->dataLen, this->valid),
                                         [](OIDType* p){ asn_delete(static_cast<BER_CONTAINER*>(p)); });
-    };
+    }
 
     OIDType* cloneRaw() const {
         return asn_new<OIDType>(this->_valueStr, this->data, this->dataLen, this->valid);
-    };
+    }
 
     const char* string();
     bool valid = false;
@@ -367,7 +367,7 @@ class OIDType: public BER_CONTAINER {
 
     friend class ComplexType;
     template<typename U, typename... Args> friend U* asn_new(Args&&... args);
-    OIDType(): BER_CONTAINER(OID) { _valueStr[0] = 0; dataLen = 0; };
+    OIDType(): BER_CONTAINER(OID) { _valueStr[0] = 0; dataLen = 0; }
 
     char _valueStr[SNMP_MAX_OID_STR_LEN + 1];
     uint8_t data[SNMP_MAX_OID_SUBIDENTIFIERS + 1];
@@ -378,13 +378,13 @@ class OIDType: public BER_CONTAINER {
         size_t len = strlen(value);
         if(len > SNMP_MAX_OID_STR_LEN) len = SNMP_MAX_OID_STR_LEN;
         _init_from_cstr_with_data(value, len, srcData, srcLen, valid);
-    };
+    }
 
     template<size_t N>
     explicit OIDType(const char (&value)[N], const uint8_t* srcData, int srcLen, bool valid): BER_CONTAINER(OID), valid(valid), dataLen(srcLen) {
         constexpr size_t cap = ( (N-1) > SNMP_MAX_OID_STR_LEN ) ? SNMP_MAX_OID_STR_LEN : (N-1);
         _init_from_cstr_with_data(value, cap, srcData, srcLen, valid);
-    };
+    }
 
     bool generateInternalData();
 };
@@ -407,7 +407,7 @@ class SortableOIDType: public OIDType {
 
 class NullType: public BER_CONTAINER {
   public:
-    NullType(): BER_CONTAINER(NULLTYPE) {};
+    NullType(): BER_CONTAINER(NULLTYPE) {}
 
 protected:
     int serialise(uint8_t* buf, size_t max_len) override;
@@ -419,15 +419,15 @@ class ImplicitNullType: public NullType {
     explicit ImplicitNullType(ASN_TYPE type): NullType(){
         //TODO: check that we're one of the implicit null types
         _type = type;
-    };
+    }
 };
 
 class Counter64: public BER_CONTAINER {
   public:
-    Counter64(): BER_CONTAINER(COUNTER64) {};
+    Counter64(): BER_CONTAINER(COUNTER64) {}
     explicit Counter64(uint64_t value): Counter64(){
         _value = value;
-    };
+    }
 
     uint64_t _value = 0;
 
@@ -440,10 +440,10 @@ class Counter32: public IntegerType {
   public:
     Counter32(): IntegerType(){
         _type = COUNTER32;
-    };
+    }
     explicit Counter32(unsigned int value): IntegerType(value){
         _type = COUNTER32;
-    };
+    }
 
 };
 
@@ -451,16 +451,16 @@ class Gauge: public IntegerType { // Unsigned int
   public:
     Gauge(): IntegerType(){
         _type = GAUGE32;
-    };
+    }
     explicit Gauge(unsigned int value): IntegerType(value){
         _type = GAUGE32;
-    };
+    }
 
 };
 
 class ComplexType: public BER_CONTAINER {
   public:
-    explicit ComplexType(ASN_TYPE type): BER_CONTAINER(type), valuesLen(0), _ownsChildren(false) {};
+    explicit ComplexType(ASN_TYPE type): BER_CONTAINER(type), valuesLen(0), _ownsChildren(false) {}
     ~ComplexType(){
         if(this->_ownsChildren){
             for(int n = 0; n < this->valuesLen; n++){
