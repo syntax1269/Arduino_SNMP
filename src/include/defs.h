@@ -194,20 +194,25 @@ extern const char* SNMP_TAG;
   #endif
 #endif
 
+
 /* SNMP_POOL_SLOT_SIZE is the raw payload size of each ASNPool::Slot.
- * Because each slot must fit the LARGEST concrete BER subclass we
- * instantiate (OctetType / OIDType / SortableOIDType with their
- * fixed-size _valueStr[] / data[] arrays) the default is tuned to
- * the worst case on 32-bit Xtensa (ESP).
- * P1 RAM §2.1 (v3.1.9): SortableOIDType no longer carries a 132-byte
- *   sortingMap[] + sortingMapLen (computed on-demand on stack now).
- *   Slot sizes reduced by 128 B each (rounded to alignment boundary).
- *   Saves 128 * SNMP_POOL_ASN_OBJECTS bytes of BSS. */
+ * Each slot must fit the LARGEST concrete BER subclass we instantiate.
+ * v3.1.25: right-sized to MEASURED sizeof() of the largest container
+ * (host sizeof probe, Xtensa-compatible layout):
+ *   TINY   config: OctetType = 288 B (_value[256] + base)  -> slot 288
+ *   default config: OIDType/SortableOIDType = 312 B         -> slot 312
+ * The previous 512/640 values predated the v3.1.9 sortingMap removal
+ * and padded every slot with 224/328 dead bytes (~44% of the arena —
+ * 17 KB of the ESP-01's 39.5 KB pool was padding). static_assert
+ * guards in BER.h now pin every container <= slot so this can never
+ * silently go stale again; a sketch raising OCTET_TYPE_MAX_LENGTH or
+ * SNMP_MAX_OID_STR_LEN gets a compile error instead of a runtime
+ * placement failure. */
 #ifndef SNMP_POOL_SLOT_SIZE
   #ifdef _SNMP_ESP8266_TINY
-    #define SNMP_POOL_SLOT_SIZE 512
+    #define SNMP_POOL_SLOT_SIZE 288
   #else
-    #define SNMP_POOL_SLOT_SIZE 640
+    #define SNMP_POOL_SLOT_SIZE 312
   #endif
 #endif
 
