@@ -27,7 +27,7 @@ class SNMPTrap : public SNMPPacket {
         this->setVersion(version);
         this->setPDUType(Trapv2PDU);
         this->setCommunityString(community);
-    };
+    }
     virtual ~SNMPTrap();
     
     IPAddress agentIP;
