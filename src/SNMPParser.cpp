@@ -83,6 +83,14 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
         break;
     }
 
+    /* NOTE: no explicit request.~SNMPPacket() here. The automatic destructor at
+     * scope exit destroys `request` exactly once, AFTER response.serialiseInto().
+     * An earlier explicit call double-destroyed every pool-backed parse object
+     * (refcount hit 0 twice) and ASNPool::release() decremented usedCount twice
+     * per object — corrupting the pool counter until slots could be handed to
+     * two live objects. Symptom on ESP-01: degraded/short GetBulk responses
+     * under trap concurrency, with no exhaustion logs. */
+
     if(pass){
         for(int idx = 0; idx < outResponseCount; idx++){
             const VarBind& item = outResponseList[idx];

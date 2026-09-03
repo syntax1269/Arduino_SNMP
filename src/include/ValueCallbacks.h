@@ -4,6 +4,17 @@
 #include "BER.h"
 #include <algorithm>
 
+template <typename T>
+static inline void vcb_pool_asn_deleter(T* p) noexcept {
+    asn_delete(static_cast<BER_CONTAINER*>(p));
+}
+
+template <typename T>
+static inline std::shared_ptr<T> vcb_pool_shared(T* p) noexcept {
+    if(!p) return nullptr;
+    return std::shared_ptr<T>(p, vcb_pool_asn_deleter<T>);
+}
+
 typedef int (*GETINT_FUNC)() ;
 typedef uint32_t (*GETUINT_FUNC)();
 typedef const char* (*GETSTRING_FUNC)();
@@ -11,7 +22,7 @@ typedef const char* (*GETSTRING_FUNC)();
 class ValueCallback {
   public:
     ValueCallback(SortableOIDType* oid, ASN_TYPE type): OID(oid), type(type){};
-    ~ValueCallback(){
+    virtual ~ValueCallback(){
         asn_delete(OID);
     }
     SortableOIDType * const OID;
@@ -24,6 +35,9 @@ class ValueCallback {
     void resetSetOccurred(){
         setOccurred = false;
     }
+
+    static const char* getTypeName(ASN_TYPE t) noexcept;
+    virtual const char* getAccessTag() const noexcept { return isSettable ? "RW" : "RO"; }
 
     static ValueCallback* findCallback(ValueCallback* const *callbacks, int callbacksCount, const OIDType* const oid, bool walk, int startAt = 0, int *foundAt = nullptr);
     static std::shared_ptr<BER_CONTAINER> getValueForCallback(ValueCallback* callback);
@@ -58,7 +72,7 @@ class StaticIntegerCallback: public ValueCallback {
     const int val;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-        return std::make_shared<IntegerType>(val);
+        return vcb_pool_shared(asn_new<IntegerType>(val));
     }
 
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
@@ -70,12 +84,13 @@ class DynamicIntegerCallback: public ValueCallback {
 public:
     DynamicIntegerCallback(SortableOIDType* oid, GETINT_FUNC callback_func):
         ValueCallback(oid, INTEGER), m_callback(callback_func) {};
+    const char* getAccessTag() const noexcept override { return "DYN"; }
 
 protected:
     GETINT_FUNC m_callback;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-        return std::make_shared<IntegerType>(m_callback());
+        return vcb_pool_shared(asn_new<IntegerType>(m_callback()));
     }
 
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
@@ -98,12 +113,13 @@ class DynamicTimestampCallback: public ValueCallback {
 public:
     DynamicTimestampCallback(SortableOIDType* oid, GETUINT_FUNC callback_func):
     ValueCallback(oid, TIMESTAMP), m_callback(callback_func) {};
+    const char* getAccessTag() const noexcept override { return "DYN"; }
 
 protected:
     GETUINT_FUNC m_callback;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-        return std::make_shared<TimestampType>(m_callback());
+        return vcb_pool_shared(asn_new<TimestampType>(m_callback()));
     }
 
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
@@ -132,12 +148,13 @@ protected:
 class DynamicStringCallback: public ValueCallback {
 public:
     DynamicStringCallback(SortableOIDType* oid, GETSTRING_FUNC callback): ValueCallback(oid, STRING), m_callback(callback) {};
+    const char* getAccessTag() const noexcept override { return "DYN"; }
 
 protected:
     GETSTRING_FUNC m_callback;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-      return std::make_shared<OctetType>(m_callback());
+      return vcb_pool_shared(asn_new<OctetType>(m_callback()));
     }
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
         return NO_ACCESS;
@@ -212,12 +229,13 @@ class Gauge32Callback: public ValueCallback {
 class DynamicGauge32Callback: public ValueCallback {
   public:
     DynamicGauge32Callback(SortableOIDType* oid, GETUINT_FUNC callback_func): ValueCallback(oid, GAUGE32), m_callback(callback_func) {};
+    const char* getAccessTag() const noexcept override { return "DYN"; }
 
   protected:
     GETUINT_FUNC m_callback;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-        return std::make_shared<Gauge>(m_callback());
+        return vcb_pool_shared(asn_new<Gauge>(m_callback()));
     }
     SNMP_ERROR_STATUS setTypeWithValue (BER_CONTAINER*) override{
         return NO_ACCESS;

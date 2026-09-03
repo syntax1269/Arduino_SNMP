@@ -3,6 +3,32 @@
 #include "include/BER.h"
 #include "include/ValueCallbacks.h"
 
+/* Every `asn_new<T>()` returns a RAW POINTER into the static ASNPool
+ * (placement-new slots).  When such a raw pointer is bound to a function
+ * parameter of type `const std::shared_ptr<BER_CONTAINER>&`, C++
+ * implicitly constructs a TEMPORARY shared_ptr using the DEFAULT
+ * `delete T` deleter — which immediately calls `delete` on a pool slot
+ * address at scope exit → Undefined Behavior.  On ESP-01 this corrupted
+ * pool metadata silently (no exception triggered since the double-free
+ * happened on a slot not currently in the free-list), causing
+ * SNMPResponse encode path to fail to build even a single VarBind →
+ * ZERO UDP TX bytes sent, agent DEAF despite UDP RX confirmed.
+ *
+ * FIX: wrap every `asn_new<T>()` passed into a `shared_ptr<T>` context
+ * with `pool_asn_sp(...)` below.  It constructs a shared_ptr whose
+ * custom deleter calls `asn_delete` instead of `operator delete`. */
+namespace {
+    struct pool_asn_deleter {
+        void operator()(BER_CONTAINER* p) const noexcept { asn_delete(p); }
+    };
+}
+template <typename T>
+static inline std::shared_ptr<BER_CONTAINER> pool_asn_sp(T* raw_pool_ptr) noexcept {
+    static_assert(std::is_base_of<BER_CONTAINER, T>::value,
+                  "pool_asn_sp only accepts BER_CONTAINER-derived pointers");
+    return std::shared_ptr<BER_CONTAINER>(static_cast<BER_CONTAINER*>(raw_pool_ptr), pool_asn_deleter());
+}
+
 template<typename... Args>
 static inline bool appendResponseVarBind(VarBind out[], int &outCount, Args&&... args){
     if(outCount >= SNMP_MAX_VARBINDS) return false;
@@ -22,9 +48,9 @@ bool handleGetRequestPDU(ValueCallback* const *callbacks, int callbacksCount, co
             SNMP_LOGD("Couldn't find callback\n");
 #if 1
             if(isGetNextRequest){
-                appendResponseVarBind(outResponseList, outResponseCount, requestVarBind, asn_new<ImplicitNullType>(ENDOFMIBVIEW));
+                appendResponseVarBind(outResponseList, outResponseCount, requestVarBind, pool_asn_sp(asn_new<ImplicitNullType>(ENDOFMIBVIEW)));
             } else {
-                appendResponseVarBind(outResponseList, outResponseCount, requestVarBind, asn_new<ImplicitNullType>(NOSUCHOBJECT));
+                appendResponseVarBind(outResponseList, outResponseCount, requestVarBind, pool_asn_sp(asn_new<ImplicitNullType>(NOSUCHOBJECT)));
             }
 
 #else
@@ -104,7 +130,7 @@ bool handleGetBulkRequestPDU(ValueCallback* const *callbacks, int callbacksCount
             const VarBind& requestVarBind = varbindList[i];
             ValueCallback* callback = ValueCallback::findCallback(callbacks, callbacksCount, requestVarBind.oid, true);
             if(!callback){
-                appendResponseVarBind(outResponseList, outResponseCount, requestVarBind, asn_new<ImplicitNullType>(ENDOFMIBVIEW));
+                appendResponseVarBind(outResponseList, outResponseCount, requestVarBind, pool_asn_sp(asn_new<ImplicitNullType>(ENDOFMIBVIEW)));
                 continue;
             }
 
@@ -130,7 +156,7 @@ bool handleGetBulkRequestPDU(ValueCallback* const *callbacks, int callbacksCount
                 SNMP_LOGD("finding next callback for OID: %s\n", oid->string());
                 ValueCallback* callback = ValueCallback::findCallback(callbacks, callbacksCount, oid, true, foundAt, &foundAt);
                 if(!callback){
-                    appendResponseVarBind(outResponseList, outResponseCount, oid, asn_new<ImplicitNullType>(ENDOFMIBVIEW));
+                    appendResponseVarBind(outResponseList, outResponseCount, oid, pool_asn_sp(asn_new<ImplicitNullType>(ENDOFMIBVIEW)));
                     oid = nullptr;
                     break;
                 }

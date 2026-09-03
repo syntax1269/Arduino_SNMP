@@ -183,6 +183,26 @@ bool OIDType::generateInternalData() {
     return true;
 }
 
+void OIDType::_init_from_cstr(const char* value, size_t len) noexcept {
+    memcpy(this->_valueStr, value, len);
+    this->_valueStr[len] = '\0';
+    this->dataLen = 0;
+    this->valid = this->generateInternalData();
+}
+
+void OIDType::_init_from_cstr_with_data(const char* value, size_t len, const uint8_t* srcData, int srcLen, bool valid_) noexcept {
+    memcpy(this->_valueStr, value, len);
+    this->_valueStr[len] = '\0';
+    if(srcLen > 0 && srcData) {
+        if(srcLen > (int)sizeof(this->data)) srcLen = (int)sizeof(this->data);
+        this->dataLen = srcLen;
+        memcpy(this->data, srcData, (size_t)srcLen);
+    } else {
+        this->dataLen = 0;
+    }
+    this->valid = valid_;
+}
+
 static inline void shift_arr_right(uint8_t* ptr, int num_length_bytes, size_t length){
     for(int l = length+num_length_bytes-1; l-num_length_bytes >= 0; l--){
         ptr[l] = ptr[l-num_length_bytes];

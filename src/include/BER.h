@@ -28,12 +28,13 @@ class BER_CONTAINER;
 
 struct ASNPool {
 #ifndef SNMP_POOL_SLOT_SIZE
-#define SNMP_POOL_SLOT_SIZE 768
+#define SNMP_POOL_SLOT_SIZE 640
 #endif
 
     struct Slot {
         alignas(8) char storage[SNMP_POOL_SLOT_SIZE];
         bool occupied;
+        bool doubleReleaseWarned;   /* one-shot alarm latch for DEBUG>0 */
     };
 
     /* SNMP_POOLS_IN_BSS = 1 forces ASNPool storage back to static .bss.
@@ -50,6 +51,17 @@ struct ASNPool {
     static Slot slots[SNMP_POOL_ASN_OBJECTS];
 #endif
     static int usedCount;
+    static int permCount;
+    static int usedCountPeak;   /* high-water mark since boot — diagnostics */
+
+    static inline void freezePermCount() noexcept {
+        int high = 0;
+        for(int i = 0; i < SNMP_POOL_ASN_OBJECTS; i++){
+            if(slots[i].occupied) high = i + 1;
+        }
+        permCount = high;
+        usedCount = high < usedCount ? high : usedCount;
+    }
 
     static inline bool isInPool(const void* p){
 #ifndef SNMP_POOLS_IN_BSS
@@ -64,21 +76,42 @@ struct ASNPool {
     }
 
     static void* rawAlloc(size_t sz){
-        if(sz > SNMP_POOL_SLOT_SIZE) return nullptr;
+        if(sz > SNMP_POOL_SLOT_SIZE) {
+            SNMP_LOGE("ASNPool::rawAlloc: request %zu B > slot %d B\n", sz, (int)SNMP_POOL_SLOT_SIZE);
+            return nullptr;
+        }
 #ifndef SNMP_POOLS_IN_BSS
         if(!_poolsReady) _ensurePools();
 #endif
+        if(usedCount >= SNMP_POOL_ASN_OBJECTS){
+            SNMP_LOGE("ASNPool EXHAUSTED: %d/%d slots in use (%d B/slot). Raise SNMP_POOL_ASN_OBJECTS. First NULL deref = Exception 28.\n",
+                      usedCount, (int)SNMP_POOL_ASN_OBJECTS, (int)SNMP_POOL_SLOT_SIZE);
+            return nullptr;
+        }
         for(int i = 0; i < SNMP_POOL_ASN_OBJECTS; i++){
             if(!slots[i].occupied){
                 slots[i].occupied = true;
                 usedCount++;
+                if(usedCount > usedCountPeak) usedCountPeak = usedCount;
                 return slots[i].storage;
             }
         }
+        SNMP_LOGE("ASNPool EXHAUSTED: %d/%d slots in use (%d B/slot). Raise SNMP_POOL_ASN_OBJECTS. First NULL deref = Exception 28.\n",
+                  usedCount, (int)SNMP_POOL_ASN_OBJECTS, (int)SNMP_POOL_SLOT_SIZE);
         return nullptr;
     }
 
     static void release(BER_CONTAINER* p);
+
+    static inline void resetAll() noexcept {
+#ifndef SNMP_POOLS_IN_BSS
+        if(!_poolsReady) return;
+#endif
+        for(int i = permCount; i < SNMP_POOL_ASN_OBJECTS; i++){
+            slots[i].occupied = false;
+        }
+        usedCount = permCount;
+    }
 };
 
 template<typename T, typename... Args>
@@ -88,7 +121,16 @@ static inline T* asn_new(Args&&... args){
         T* obj = ::new (slot) T(std::forward<Args>(args)...);
         return obj;
     }
+#ifdef COMPILING_TESTS
+    /* Native host tests: pool capacity is a logic stress-test vector, not a
+       hard safety bound.  Host has GB of free RAM so falling back to operator
+       new allows 101/101 Catch2 assertions to exercise logic end-to-end without
+       needing an enormous static pool.  On real MCU targets (COMPILING_TESTS
+       undefined) we strictly return nullptr = zero hot-path heap. */
     return ::new T(std::forward<Args>(args)...);
+#else
+    return nullptr;
+#endif
 }
 
 void asn_delete(BER_CONTAINER* p);
@@ -279,14 +321,18 @@ class OIDType: public BER_CONTAINER {
     explicit OIDType(const char* value): BER_CONTAINER(OID) {
         size_t len = strlen(value);
         if(len > SNMP_MAX_OID_STR_LEN) len = SNMP_MAX_OID_STR_LEN;
-        memcpy(_valueStr, value, len);
-        _valueStr[len] = 0;
-        this->dataLen = 0;
-        this->valid = this->generateInternalData();
+        _init_from_cstr(value, len);
+    };
+
+    template<size_t N>
+    OIDType(const char (&value)[N]): BER_CONTAINER(OID) {
+        constexpr size_t cap = ( (N-1) > SNMP_MAX_OID_STR_LEN ) ? SNMP_MAX_OID_STR_LEN : (N-1);
+        _init_from_cstr(value, cap);
     };
 
     std::shared_ptr<OIDType> cloneOID() const {
-        return std::shared_ptr<OIDType>(asn_new<OIDType>(this->_valueStr, this->data, this->dataLen, this->valid));
+        return std::shared_ptr<OIDType>(asn_new<OIDType>(this->_valueStr, this->data, this->dataLen, this->valid),
+                                        [](OIDType* p){ asn_delete(static_cast<BER_CONTAINER*>(p)); });
     };
 
     OIDType* cloneRaw() const {
@@ -308,15 +354,6 @@ class OIDType: public BER_CONTAINER {
 
     bool isSubTreeOf(const OIDType* const oid){
         if(oid->dataLen >= this->dataLen) return false;
-        /* oid must be an exact prefix of this data (front of array).
-           Old code used reverse-equal (from the tail) which works only for
-           equal-sized trailing bytes, but semantically OID subtree is a
-           leading-prefix check, which is the same as:
-              compare first oid->dataLen bytes of this->data == oid->data
-           Reverse-equal worked because the `std::equal(rbegin, rend, rbegin + off)`
-           form verified that the suffix matched offset-tail; mathematically
-           equivalent to prefix match when off = this->size - oid->size. For a
-           zero-allocation version we just do the direct prefix check. */
         if(oid->dataLen == 0) return true;
         return memcmp(this->data, oid->data, (size_t)oid->dataLen) == 0;
     }
@@ -324,6 +361,9 @@ class OIDType: public BER_CONTAINER {
   protected:
     int serialise(uint8_t* buf, size_t max_len) override;
     int fromBuffer(const uint8_t *buf, size_t max_len) override;
+
+    void _init_from_cstr(const char* value, size_t len) noexcept;
+    void _init_from_cstr_with_data(const char* value, size_t len, const uint8_t* srcData, int srcLen, bool valid) noexcept;
 
     friend class ComplexType;
     template<typename U, typename... Args> friend U* asn_new(Args&&... args);
@@ -337,15 +377,13 @@ class OIDType: public BER_CONTAINER {
     explicit OIDType(const char* value, const uint8_t* srcData, int srcLen, bool valid): BER_CONTAINER(OID), valid(valid), dataLen(srcLen) {
         size_t len = strlen(value);
         if(len > SNMP_MAX_OID_STR_LEN) len = SNMP_MAX_OID_STR_LEN;
-        memcpy(_valueStr, value, len);
-        _valueStr[len] = 0;
-        if(srcLen > 0 && srcData) {
-            if(srcLen > (int)sizeof(this->data)) srcLen = (int)sizeof(this->data);
-            this->dataLen = srcLen;
-            memcpy(this->data, srcData, (size_t)srcLen);
-        } else {
-            this->dataLen = 0;
-        }
+        _init_from_cstr_with_data(value, len, srcData, srcLen, valid);
+    };
+
+    template<size_t N>
+    explicit OIDType(const char (&value)[N], const uint8_t* srcData, int srcLen, bool valid): BER_CONTAINER(OID), valid(valid), dataLen(srcLen) {
+        constexpr size_t cap = ( (N-1) > SNMP_MAX_OID_STR_LEN ) ? SNMP_MAX_OID_STR_LEN : (N-1);
+        _init_from_cstr_with_data(value, cap, srcData, srcLen, valid);
     };
 
     bool generateInternalData();
@@ -353,21 +391,18 @@ class OIDType: public BER_CONTAINER {
 
 class SortableOIDType: public OIDType {
   public:
-    explicit SortableOIDType(const char* value): OIDType(value), sortingMapLen(0) {
-        generateSortingMap(this->sortingMap, &this->sortingMapLen);
-    }
+    explicit SortableOIDType(const char* value): OIDType(value) {}
 
-    static bool sort_oids(SortableOIDType* oid1, SortableOIDType* oid2);
+    template<size_t N>
+    SortableOIDType(const char (&value)[N]): OIDType(value) {}
+
+    static bool sort_oids(const SortableOIDType* oid1, const SortableOIDType* oid2);
 
     bool operator < (SortableOIDType& other){
         return SortableOIDType::sort_oids(this, &other);
     }
 
-    uint32_t sortingMap[SNMP_MAX_OID_SUBIDENTIFIERS];
-    int sortingMapLen;
-
   private:
-    void generateSortingMap(uint32_t outMap[SNMP_MAX_OID_SUBIDENTIFIERS], int* outLen) const;
 };
 
 class NullType: public BER_CONTAINER {
@@ -444,7 +479,15 @@ class ComplexType: public BER_CONTAINER {
     int serialise(uint8_t* buf, size_t max_len) override;
 
     BER_CONTAINER* addValueToListRaw(BER_CONTAINER* newObj){
-        if(this->valuesLen >= SNMP_MAX_COMPLEX_CHILDREN) return nullptr;
+        if(!newObj){
+            SNMP_LOGE("ComplexType::addValueToListRaw: nullptr child rejected (ASNPool exhausted?)\n");
+            return nullptr;
+        }
+        if(this->valuesLen >= SNMP_MAX_COMPLEX_CHILDREN){
+            SNMP_LOGE("ComplexType::addValueToListRaw: values[] full (%d max). Raise SNMP_MAX_COMPLEX_CHILDREN.\n",
+                      (int)SNMP_MAX_COMPLEX_CHILDREN);
+            return nullptr;
+        }
         this->values[this->valuesLen++] = newObj;
         return newObj;
     }

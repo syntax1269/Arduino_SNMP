@@ -152,6 +152,10 @@ class SNMPPacket {
   protected:
     virtual bool build();
 
+    typedef bool (*BuildPDUHeaderFn)(ComplexType* snmpPDU, void* userdata);
+
+    bool _build_pdu_envelope(BuildPDUHeaderFn fill_pdu, void* userdata);
+
     virtual std::shared_ptr<ComplexType> generateVarBindList();
 
     /* Build the varbind tree with uniform recursive ownership (raw new'd;

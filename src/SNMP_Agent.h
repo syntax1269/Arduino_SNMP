@@ -5,6 +5,7 @@
 	#include "tests/required/millis.h"
 	#include "tests/required/IPAddress.h"
 	#include "tests/required/UDP.h"
+	#include "tests/required/Print.h"
 #else
 	#include <Arduino.h>
 	#include "IPAddress.h"
@@ -29,7 +30,9 @@
 class SNMPAgent {
     public:
         SNMPAgent(){
-            SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
+            if(SNMPAgent::agentsCount < SNMP_MAX_AGENTS){
+                SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
+            }
         };
 
         SNMPAgent(const char* community){
@@ -37,7 +40,9 @@ class SNMPAgent {
             if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
             memcpy(_community, community, len);
             _community[len] = 0;
-            SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
+            if(SNMPAgent::agentsCount < SNMP_MAX_AGENTS){
+                SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
+            }
         };
 
         SNMPAgent(const char* readOnlyCommunity, const char* readWriteCommunity){
@@ -48,11 +53,17 @@ class SNMPAgent {
             len = strlen(readOnlyCommunity);
             if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
             memcpy(_readOnlyCommunity, readOnlyCommunity, len);
-            _readOnlyCommunity[len] = 0;
-            SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
+            _readOnlyCommunity[len] = 0;            if(SNMPAgent::agentsCount < SNMP_MAX_AGENTS){
+                SNMPAgent::agents[SNMPAgent::agentsCount++] = this;
+            }
         }
 
-        void setReadOnlyCommunity(const char* community){
+        /* Runtime library version (LIBRARY_VERSION from defs.h). Use in sketches to
+           print/serve the exact build under test, e.g. hardware-test banners. */
+        static const char* getVersion(){ return LIBRARY_VERSION; }
+
+        void
+        setReadOnlyCommunity(const char* community){
             size_t len = strlen(community);
             if(len > SNMP_MAX_COMMUNITY_LEN) len = SNMP_MAX_COMMUNITY_LEN;
             memcpy(this->_readOnlyCommunity, community, len);
@@ -110,6 +121,8 @@ class SNMPAgent {
 
         bool removeHandler(ValueCallback* callback);
         bool sortHandlers();
+
+        void printAllOIDsTo(Print& out) const;
 
         snmp_request_id_t sendTrapTo(SNMPTrap* trap, const IPAddress& ip, bool replaceQueuedRequests = true, int retries = 0, int delay_ms = 30000);
         static void markTrapDeleted(SNMPTrap* trap);

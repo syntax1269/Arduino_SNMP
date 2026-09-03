@@ -85,7 +85,10 @@ const char* oidSysName = ".1.3.6.1.2.1.1.5.0";     // OctetString SysName
 const char* oidSysLocation = ".1.3.6.1.2.1.1.6.0"; // OctetString SysLocation
 const char* oidSysServices = ".1.3.6.1.2.1.1.7.0"; // Integer sysServices
 
-char sysDescr[] = "SNMP Agent";
+/* Versioned sysDescr served on .1.3.6.1.2.1.1.1.0 — filled in setup() with the
+   running library version so `snmpget` confirms the exact build during hardware
+   testing. 64 B leaves room for the version string; handler keeps the pointer. */
+static char sysDescr[64] = "SNMP Agent";
 char sysObjectID[] = "";
 uint32_t sysUptime = 0;
 char sysContactValue[255];
@@ -194,6 +197,10 @@ void printFile(const char* filename);
 void setup()
 {
     Serial.begin(115200);
+
+    // Hardware-test banner: confirm the flashed library version in the serial monitor
+    Serial.printf("SNMP_Agent v%s\n", snmp.getVersion());
+
     if (!FS_BEGIN())
     {
         Serial.println("LittleFS Mount Failed");
@@ -216,6 +223,10 @@ void setup()
     // give snmp a pointer to the UDP object
     snmp.setUDP(&udp);
     snmp.begin();
+
+    // Fill sysDescr (.1.3.6.1.2.1.1.1.0) with the version string, queryable from the
+    // SNMP terminal: snmpget -v 2c -c public <IP> .1.3.6.1.2.1.1.1.0
+    snprintf(sysDescr, sizeof(sysDescr), "SNMP_Sensor demo (SNMP_Agent v%s)", snmp.getVersion());
 
     addRFC1213MIBHandler();      // RFC1213-MIB (System)
     addENTITYMIBHandler();       // ENTITY-MIB
