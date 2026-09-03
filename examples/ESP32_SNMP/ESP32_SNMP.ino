@@ -49,6 +49,11 @@ TimestampCallback* timestampCallbackOID;
 
 char staticString[] = "This value will never change";
 
+/* Versioned sysDescr served on .1.3.6.1.2.1.1.1.0 — the handler keeps the pointer,
+   so this must be a static buffer, not a local. Lets `snmpget` confirm the exact
+   library build running on the chip during hardware testing. */
+static char sysDescrBuf[64];
+
 // Setup an SNMPTrap for later use
 SNMPTrap* settableNumberTrap = new SNMPTrap("public", SNMP_VERSION_2C);
 char _changingStringBuf[25];
@@ -56,6 +61,10 @@ char* changingString = _changingStringBuf;
 
 void setup(){
     Serial.begin(115200);
+
+    // Hardware-test banner: confirm the flashed library version in the serial monitor
+    Serial.printf("SNMP_Agent v%s\n", snmp.getVersion());
+
     WiFi.begin(ssid, password);
     // WiFi.begin(ssid);
     Serial.println("");
@@ -81,6 +90,11 @@ void setup(){
     stuff[2] = 24;
     stuff[3] = 67;
     
+    // RFC1213 sysDescr: serves the library version, queryable from the SNMP terminal:
+    //   snmpget -v 2c -c public <IP> .1.3.6.1.2.1.1.1.0
+    snprintf(sysDescrBuf, sizeof(sysDescrBuf), "ESP32_SNMP demo (SNMP_Agent v%s)", snmp.getVersion());
+    snmp.addReadOnlyStaticStringHandler(".1.3.6.1.2.1.1.1.0", sysDescrBuf);
+
     // add 'callback' for an OID - pointer to an integer
     changingNumberOID = snmp.addIntegerHandler(".1.3.6.1.4.1.5.0", &changingNumber);
     
