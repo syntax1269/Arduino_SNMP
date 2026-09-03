@@ -1,30 +1,47 @@
 /*
- * SNMP_Agent minimal demo — ESP32 (esp32:esp32:esp32)
+ * SNMP_Agent minimal demo — ESP32
  * Target:    arduino-cli compile --fqbn esp32:esp32:esp32
- * Purpose:   DoD H — confirm Arduino-CLI ESP32 build is zero-error,
- *            zero-warning against the current SNMP_Agent HEAD checkout.
- *
- * Wiring:    Serial 115200 baud (native USB on ESP32 DevKitC).
+ * Purpose:   Zero-config starting point: fill in WiFi credentials, flash,
+ *            and poll the OIDs below with net-snmp from any machine.
  *
  * Before run:
  *   1. Fill in WIFI_SSID / WIFI_PASSWORD below.
- *   2. Install esp32:esp32 core via Arduino CLI board manager.
- *   3. Symlink / copy this repo into your <sketchbook>/libraries/SNMP_Agent
- *      (Arduino-CLI scans for libraries here at compile time).
- *      e.g. ln -s <repo> ~/Arduino/libraries/SNMP_Agent
+ *   2. Install the esp32 core via the Arduino CLI board manager.
+ *   3. Install this library into <sketchbook>/libraries/SNMP_Agent
+ *      (Arduino-CLI scans for libraries there at compile time).
+ *
+ * Test from another machine once the IP prints to serial:
+ *   snmpget      -v 2c -c public  <ip> .1.3.6.1.4.1.5.0
+ *   snmpset      -v 2c -c private <ip> .1.3.6.1.4.1.5.0 i 99
+ *   snmpbulkwalk -v 2c -c public  <ip> .1.3.6.1.4.1.5
  */
 
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <SNMP_Agent.h>
 
 #define WIFI_SSID     "your-ssid-here"
 #define WIFI_PASSWORD "your-pass-here"
 
-static SNMPAgent agent;
+/* NOTE (v3.2.0+): never #define library size knobs (SNMP_MAX_CALLBACKS_PER_AGENT,
+ * SNMP_POOL_*, OCTET_TYPE_MAX_LENGTH, ...) inside a sketch file. They change
+ * CLASS LAYOUT, so a sketch-only #define makes the sketch and the compiled
+ * library disagree about object sizes -> undefined behaviour. Set them as
+ * GLOBAL build flags, e.g.
+ *   arduino-cli ... --build-flags "-DSNMP_MAX_CALLBACKS_PER_AGENT=16"
+ * This demo needs no overrides: the library auto-sizes its pools from the
+ * number of handlers you register, locks the arena in at boot, and serves
+ * requests with zero per-packet heap traffic. */
 
-static int          myInteger   = 42;
-static char         sensorName[] = "ESP32-Sensor";
-static uint32_t     counter32   = 0;
+// The UDP socket the agent listens on. The agent calls udp.begin(161) itself
+// inside begin() — you only need to hand it over with setUDP().
+static WiFiUDP udp;
+
+static SNMPAgent agent = SNMPAgent("public", "private");
+
+static int      myInteger = 42;                  // SETtable via snmpset
+static char     sensorName[] = "ESP32-Sensor";
+static uint32_t counter32 = 0;
 
 static uint32_t getUptimeSeconds(void) { return (uint32_t)(millis() / 1000U); }
 
@@ -33,7 +50,7 @@ void setup()
     Serial.begin(115200);
     delay(500);
     Serial.println();
-    Serial.println("SNMP_Agent v3.x minimal demo (ESP32)");
+    Serial.printf("SNMP_Agent v%s minimal demo (ESP32)\n", agent.getVersion());
 
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -42,29 +59,34 @@ void setup()
         Serial.print('.');
     }
     Serial.println();
-    Serial.print("IP: "); Serial.println(WiFi.localIP());
+    Serial.print(F("IP: ")); Serial.println(WiFi.localIP());
 
-    agent.begin();   // Default community: "public", OID prefix: ".1.3.6.1.2.1.1"
+    // REQUIRED wiring: UDP socket first, then bind + start listening.
+    agent.setUDP(&udp);
+    agent.begin();
 
-    /* Three representative handlers to stress-test different ValueCallback
-     * code paths (integer / static string / dynamic-timestamp). */
-    agent.addIntegerHandler(".8.0", &myInteger, true);
-    agent.addReadOnlyStaticStringHandler(".5.0", sensorName);
-    agent.addDynamicReadOnlyTimestampHandler(".3.0", getUptimeSeconds);
+    // Three representative handlers (integer / static string / dynamic timestamp).
+    agent.addIntegerHandler(".1.3.6.1.4.1.5.0", &myInteger, true);
+    agent.addReadOnlyStaticStringHandler(".1.3.6.1.4.1.5.1", sensorName);
+    agent.addDynamicReadOnlyTimestampHandler(".1.3.6.1.4.1.5.2", getUptimeSeconds);
+    agent.addCounter32Handler(".1.3.6.1.4.1.5.3", &counter32);
 
-    agent.addCounter32Handler(".6.1.2.1.0", &counter32);
+    // Keep walk order correct after registering handlers.
+    agent.sortHandlers();
 
-    Serial.println("SNMP agent started. try: snmpget -v 2c -c public <ip> .1.3.6.1.2.1.1.8.0");
+    Serial.println(F("SNMP agent started. try:"));
+    Serial.println(F("  snmpget      -v 2c -c public  <ip> .1.3.6.1.4.1.5.0"));
+    Serial.println(F("  snmpset      -v 2c -c private <ip> .1.3.6.1.4.1.5.0 i 99"));
+    Serial.println(F("  snmpbulkwalk -v 2c -c public  <ip> .1.3.6.1.4.1.5"));
 }
 
 void loop()
 {
-    agent.loop();
+    agent.loop();   // must be called as often as possible
 
     static unsigned long lastTick = 0;
     if (millis() - lastTick > 1000UL) {
         lastTick = millis();
-        counter32++;     /* Exercise the counter32 handler on each tick so
-                            subsequent SNMP walks see changing data. */
+        counter32++;   // demo counter: +1 per second
     }
 }

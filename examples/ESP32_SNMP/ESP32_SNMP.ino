@@ -5,21 +5,23 @@
 #endif
 
 /* -------------------------------------------------------------------------- *
- * COMPILE-TIME TUNING (optional, BEFORE #include <SNMP_Agent.h>)
+ * MEMORY MODEL (SNMP_Agent v3.2.0+ — nothing to configure for this sketch)
  *
- *   All SNMP size constants in src/include/defs.h are wrapped with
- *   `#ifndef ... #endif` so a sketch-side #define placed here wins over the
- *   library defaults. Good targets for ESP-01 1 MB / 80 KB RAM sensors:
+ *   The library derives its ASN pool size at compile time from the number of
+ *   handlers you register (SNMP_MAX_CALLBACKS_PER_AGENT) plus the worst-case
+ *   transient demand of the configured caps, and locks the arena in as one
+ *   contiguous block in the SNMPAgent constructor — before setup() and WiFi —
+ *   so packet handling performs zero per-packet heap traffic.
  *
- *   #define SNMP_MAX_COMPLEX_CHILDREN       8
- *   #define SNMP_MAX_VARBINDS               4
- *   #define SNMP_MAX_CALLBACKS_PER_AGENT   16
- *   #define SNMP_MAX_TRAPS_INFLIGHT         4
- *   #define SNMP_POOL_ASN_OBJECTS          32
- *   #define SNMP_POOL_VARBIND_OBJECTS      12
- *
- *   Saves ~25 KB BSS (ASNPool halves: (64 - 32) * 768 B = 24,576 B) and a
- *   few KB more from smaller fixed callback/varbind arrays.
+ *   !! SIZE OVERRIDES AND THE ONE-DEFINITION RULE !!
+ *   Never #define size knobs (SNMP_MAX_CALLBACKS_PER_AGENT, SNMP_POOL_*,
+ *   OCTET_TYPE_MAX_LENGTH, ...) inside a sketch file: they change CLASS
+ *   LAYOUT, so a sketch-only #define makes the sketch and the compiled
+ *   library disagree about object sizes -> undefined behaviour (on ESP8266:
+ *   instant reboot loops). Set them as GLOBAL build flags so every
+ *   translation unit agrees:
+ *       arduino-cli:  --build-flags "-DSNMP_MAX_CALLBACKS_PER_AGENT=64"
+ *       platformio :  build_flags = -DSNMP_MAX_CALLBACKS_PER_AGENT=64
  * -------------------------------------------------------------------------- */
 
 #include <WiFiUdp.h>
@@ -49,6 +51,11 @@ TimestampCallback* timestampCallbackOID;
 
 char staticString[] = "This value will never change";
 
+/* Versioned sysDescr served on .1.3.6.1.2.1.1.1.0 — the handler keeps the pointer,
+   so this must be a static buffer, not a local. Lets `snmpget` confirm the exact
+   library build running on the chip during hardware testing. */
+static char sysDescrBuf[64];
+
 // Setup an SNMPTrap for later use
 SNMPTrap* settableNumberTrap = new SNMPTrap("public", SNMP_VERSION_2C);
 char _changingStringBuf[25];
@@ -56,6 +63,10 @@ char* changingString = _changingStringBuf;
 
 void setup(){
     Serial.begin(115200);
+
+    // Hardware-test banner: confirm the flashed library version in the serial monitor
+    Serial.printf("SNMP_Agent v%s\n", snmp.getVersion());
+
     WiFi.begin(ssid, password);
     // WiFi.begin(ssid);
     Serial.println("");
@@ -81,6 +92,11 @@ void setup(){
     stuff[2] = 24;
     stuff[3] = 67;
     
+    // RFC1213 sysDescr: serves the library version, queryable from the SNMP terminal:
+    //   snmpget -v 2c -c public <IP> .1.3.6.1.2.1.1.1.0
+    snprintf(sysDescrBuf, sizeof(sysDescrBuf), "ESP32_SNMP demo (SNMP_Agent v%s)", snmp.getVersion());
+    snmp.addReadOnlyStaticStringHandler(".1.3.6.1.2.1.1.1.0", sysDescrBuf);
+
     // add 'callback' for an OID - pointer to an integer
     changingNumberOID = snmp.addIntegerHandler(".1.3.6.1.4.1.5.0", &changingNumber);
     
