@@ -56,6 +56,11 @@ queue_and_send_trap(struct InformItem **informList, int& informCount, SNMPTrap *
     bool buildStatus = trap->buildForSending();
     if(!buildStatus) {
         SNMP_LOGW("Couldn't build trap\n");
+        /* v3.3.3: _build_pdu_envelope assigns this->packet=root BEFORE filling;
+         * a mid-build failure leaves a partial tree in the persistent trap
+         * object — stale cross-tick pool state (the slot-12 alarm class).
+         * Release it now; the trap stays stateless either way. */
+        trap->releasePoolState();
         return INVALID_SNMP_REQUEST_ID;
     };
     SNMP_LOGD("%d informs in informList", informCount);

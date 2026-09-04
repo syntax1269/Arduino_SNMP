@@ -5,44 +5,33 @@
 #endif
 
 /* -------------------------------------------------------------------------- *
- * COMPILE-TIME TUNING (optional, BEFORE #include <SNMP_Agent.h>)
+ * MEMORY MODEL (SNMP_Agent v3.2.0+ — nothing to configure for this sketch)
  *
- *   SNMP v3.1.3+ auto-tunes itself for ESP8266: on ESP8266 the library
- *   activates a "_SNMP_ESP8266_TINY" profile that shrinks all static pool
- *   sizes so that WiFi + LittleFS + ArduinoJson + SNMP fit into 80 KB DRAM
- *   with headroom (~ -28 KB BSS vs the generic defaults).  This sketch
- *   registers 34 OID callbacks, well within the ESP8266 profile budget of
- *   24 callbacks + 24 ASN pool slots + 8 VarBind slots.
- *
- *   All SNMP size constants live in src/include/defs.h and are wrapped with
- *   `#ifndef ... #endif`.  To OVERRIDE library or auto-tune values from
- *   your sketch, put a #define HERE (before SNMP_Agent.h).  Examples:
- *
- *       // Reclaim capacity on bigger ESP8266 modules or ESP32 sketches:
- *       #define SNMP_MAX_CALLBACKS_PER_AGENT   64
- *       #define SNMP_POOL_ASN_OBJECTS          32
- *       #define SNMP_MAX_VARBINDS               16
- *       #define SNMP_MAX_COMPLEX_CHILDREN       16
- *
- *       // Opt OUT of ESP8266 auto-tune entirely (use generic defaults):
- *       #define SNMP_SKIP_ESP8266_AUTOTUNE      1
- *
- *       // Drop max OctetString/Opaque payload size further for tiny sensors:
- *       #define OCTET_TYPE_MAX_LENGTH           128
- *
- *   Snapshot of the on-by-default ESP8266 auto-tune profile applied by
- *   SNMP_Agent v3.1.3+ (NOT a sketch-side define, just shown for reference):
- *       MAX_SNMP_PACKET_LENGTH                1024
- *       OCTET_TYPE_MAX_LENGTH                  256
- *       SNMP_MAX_OID_STR_LEN                   192
- *       SNMP_MAX_COMPLEX_CHILDREN                8
+ *   The library auto-tunes itself for ESP8266 ("_SNMP_ESP8266_TINY" profile)
+ *   and DERIVES its ASN pool size at compile time from the number of handlers
+ *   you register (SNMP_MAX_CALLBACKS_PER_AGENT) plus the worst-case transient
+ *   demand of the configured caps. The arena is locked in as one contiguous
+ *   block in the SNMPAgent constructor — before setup() and WiFi — so packet
+ *   handling performs zero per-packet heap traffic and cannot fragment the
+ *   heap. On ESP8266 the derived TINY defaults for this sketch's profile are:
  *       SNMP_MAX_VARBINDS                        6
  *       SNMP_MAX_CALLBACKS_PER_AGENT            24
- *       SNMP_MAX_TRAPS_INFLIGHT                  4
- *       SNMP_MAX_CALLBACKS_PER_TRAP              8
- *       SNMP_POOL_ASN_OBJECTS                   24
- *       SNMP_POOL_VARBIND_OBJECTS                8
- *       SNMP_POOL_SLOT_SIZE                    640
+ *       SNMP_POOL_ASN_OBJECTS  (derived)        84 x 288 B, locked at boot
+ *
+ *   !! SIZE OVERRIDES AND THE ONE-DEFINITION RULE !!
+ *   Never #define size knobs (SNMP_MAX_CALLBACKS_PER_AGENT, SNMP_POOL_*,
+ *   OCTET_TYPE_MAX_LENGTH, ...) inside a sketch file: they change CLASS
+ *   LAYOUT, so a sketch-only #define makes the sketch and the compiled
+ *   library disagree about object sizes -> undefined behaviour (on ESP8266:
+ *   instant reboot loops). Set them as GLOBAL build flags so every
+ *   translation unit agrees:
+ *       arduino-cli:  --build-flags "-DSNMP_MAX_CALLBACKS_PER_AGENT=64"
+ *       platformio :  build_flags = -DSNMP_MAX_CALLBACKS_PER_AGENT=64
+ *
+ *   Handler budget: the ESP8266 TINY profile caps registrations at 24.
+ *   This sketch registers 33 OIDs across three MIB groups, so the 18-OID
+ *   ENTITY-MIB physical row is compiled in only on non-TINY targets (the
+ *   RFC1213 system group and the ENTITY-SENSOR-MIB values remain on all).
  * -------------------------------------------------------------------------- */
 
 #include <WiFiUdp.h>
@@ -85,7 +74,10 @@ const char* oidSysName = ".1.3.6.1.2.1.1.5.0";     // OctetString SysName
 const char* oidSysLocation = ".1.3.6.1.2.1.1.6.0"; // OctetString SysLocation
 const char* oidSysServices = ".1.3.6.1.2.1.1.7.0"; // Integer sysServices
 
-char sysDescr[] = "SNMP Agent";
+/* Versioned sysDescr served on .1.3.6.1.2.1.1.1.0 — filled in setup() with the
+   running library version so `snmpget` confirms the exact build during hardware
+   testing. 64 B leaves room for the version string; handler keeps the pointer. */
+static char sysDescr[64] = "SNMP Agent";
 char sysObjectID[] = "";
 uint32_t sysUptime = 0;
 char sysContactValue[255];
@@ -131,7 +123,7 @@ char entPhysicalFirmwareRev_1[] = "";
 char entPhysicalSoftwareRev_1[] = "";
 char entPhysicalSerialNum_1[] = "";
 char entPhysicalMfgName_1[] = "";
-char entPhysicalModelName_11[] = "";
+char entPhysicalModelName_1[] = "";
 char entPhysicalAlias_1[] = "";
 char entPhysicalAssetID_1[] = "";
 int entPhysicalIsFRU_1 = 0;
@@ -194,6 +186,10 @@ void printFile(const char* filename);
 void setup()
 {
     Serial.begin(115200);
+
+    // Hardware-test banner: confirm the flashed library version in the serial monitor
+    Serial.printf("SNMP_Agent v%s\n", snmp.getVersion());
+
     if (!FS_BEGIN())
     {
         Serial.println("LittleFS Mount Failed");
@@ -217,9 +213,16 @@ void setup()
     snmp.setUDP(&udp);
     snmp.begin();
 
-    addRFC1213MIBHandler();      // RFC1213-MIB (System)
-    addENTITYMIBHandler();       // ENTITY-MIB
-    addENTITYSENSORMIBHandler(); // ENTITY-SENSOR-MIB
+    // Fill sysDescr (.1.3.6.1.2.1.1.1.0) with the version string, queryable from the
+    // SNMP terminal: snmpget -v 2c -c public <IP> .1.3.6.1.2.1.1.1.0
+    snprintf(sysDescr, sizeof(sysDescr), "SNMP_Sensor demo (SNMP_Agent v%s)", snmp.getVersion());
+
+    addRFC1213MIBHandler();      // RFC1213-MIB (System) — 7 OIDs
+#ifndef _SNMP_ESP8266_TINY
+    addENTITYMIBHandler();       // ENTITY-MIB — 18 OIDs; needs the 64-handler
+                                 // default profile (ESP8266 TINY caps at 24)
+#endif
+    addENTITYSENSORMIBHandler(); // ENTITY-SENSOR-MIB — 8 OIDs
 
     // Read previously stored values, if any.
     if (loadSNMPValues())
@@ -228,7 +231,7 @@ void setup()
         printFile(savedValuesFile);
     }
 
-    // Ensure to sortHandlers after adding/removing and OID callbacks - this makes snmpwalk work
+    // Ensure to sortHandlers after adding/removing OID callbacks - this makes snmpwalk work
     snmp.sortHandlers();
 }
 
@@ -397,7 +400,7 @@ void addENTITYMIBHandler()
     snmp.addReadOnlyStaticStringHandler(oidentPhysicalSoftwareRev_1, entPhysicalSoftwareRev_1);
     snmp.addReadOnlyStaticStringHandler(oidentPhysicalSerialNum_1, entPhysicalSerialNum_1);
     snmp.addReadOnlyStaticStringHandler(oidentPhysicalMfgName_1, entPhysicalMfgName_1);
-    snmp.addReadOnlyStaticStringHandler(oidentPhysicalModelName_1, entPhysicalModelName_11);
+    snmp.addReadOnlyStaticStringHandler(oidentPhysicalModelName_1, entPhysicalModelName_1);
     snmp.addReadOnlyStaticStringHandler(oidentPhysicalAlias_1, entPhysicalAlias_1);
     snmp.addReadOnlyStaticStringHandler(oidentPhysicalAssetID_1, entPhysicalAssetID_1);
     snmp.addIntegerHandler(oidentPhysicalIsFRU_1, &entPhysicalIsFRU_1);
