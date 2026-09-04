@@ -36,7 +36,7 @@ union ErrorIndex {
 
 class SNMPPacket {
   public:
-    SNMPPacket(){};
+    SNMPPacket(){}
     explicit SNMPPacket(const SNMPPacket& packet){
         this->setRequestID(packet.requestID);
         this->setVersion(packet.snmpVersion);
@@ -60,7 +60,7 @@ class SNMPPacket {
          * initializers: varbindCount=0 + default-constructed VarBind
          * slots) because callers (e.g. SNMPResponse copy-from-request)
          * populate the response via addResponse() calls. */
-    };
+    }
 
     virtual ~SNMPPacket();
 
@@ -144,6 +144,23 @@ class SNMPPacket {
         }
     }
 
+    /* v3.3.3 — stateless teardown of all pool-backed members (packet tree,
+     * varbindList contents, parsed header containers).  Traps/informs are
+     * persistent sketch objects whose members previously outlived the send:
+     * ASNPool::resetAll() in loop() flag-freed those slots while the pointers
+     * remained live, and after flood traffic recycled them the NEXT trap's
+     * stale deletes/cloans hit re-armed slots — the residual "slot-12" DOUBLE
+     * RELEASE alarm (and a latent use-after-reuse).  Releasing immediately
+     * after serialisation leaves nothing stale: the next rebuild's
+     * asn_delete(this->packet) is asn_delete(nullptr).  Idempotent. */
+    virtual void releasePoolState(){        this->clear();                       /* frees varbindList oid/value  */
+        asn_delete(this->packet);            /* frees the whole packet tree  */
+        this->packet = nullptr;
+        this->requestIDPtr      = nullptr;   /* parsed-header containers     */
+        this->snmpVersionPtr    = nullptr;
+        this->communityStringPtr = nullptr;
+    }
+
     union ErrorStatus errorStatus = { NO_ERROR };
     union ErrorIndex errorIndex = {0};
 
@@ -151,6 +168,10 @@ class SNMPPacket {
     
   protected:
     virtual bool build();
+
+    typedef bool (*BuildPDUHeaderFn)(ComplexType* snmpPDU, void* userdata);
+
+    bool _build_pdu_envelope(BuildPDUHeaderFn fill_pdu, void* userdata);
 
     virtual std::shared_ptr<ComplexType> generateVarBindList();
 

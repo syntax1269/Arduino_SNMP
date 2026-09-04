@@ -28,7 +28,7 @@
 
 class TEMPSTR {
 public:
-    const char* c_str(){return "";};
+    const char* c_str(){return "";}
 };
 
 class IPAddress
@@ -58,7 +58,7 @@ public:
 
     TEMPSTR toString(){
         return TEMPSTR();
-    };
+    }
 
     // Overloaded cast operator to allow IPAddress objects to be used where a pointer
     // to a four-byte uint8_t array is expected

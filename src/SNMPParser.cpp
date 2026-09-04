@@ -62,7 +62,17 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
                 pass = false;
                 globalError = GEN_ERR;
             } else {
-                pass = handleGetBulkRequestPDU(callbacks, callbacksCount, request.varbindList, request.varbindCount, outResponseList, outResponseCount, request.errorStatus.nonRepeaters, request.errorIndex.maxRepititions);
+                /* v3.1.24: a GetBulk whose repeater expansion exceeds
+                 * SNMP_MAX_VARBINDS now answers with an RFC 3416 tooBig
+                 * error PDU instead of silently truncating the response
+                 * varbind list. */
+                bool bulkOverflow = false;
+                pass = handleGetBulkRequestPDU(callbacks, callbacksCount, request.varbindList, request.varbindCount, outResponseList, outResponseCount, request.errorStatus.nonRepeaters, request.errorIndex.maxRepititions, &bulkOverflow);
+                if(bulkOverflow){
+                    SNMP_LOGW("GetBulk expansion exceeds SNMP_MAX_VARBINDS (%d): responding tooBig (was: silently truncated). Raise SNMP_MAX_VARBINDS via sketch #define before #include <SNMP_Agent.h>.\n", SNMP_MAX_VARBINDS);
+                    pass = false;
+                    globalError = TOO_BIG;
+                }
                 handleStatus = SNMP_GETBULK_OCCURRED;
             }
         break;
@@ -83,6 +93,14 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
         break;
     }
 
+    /* NOTE: no explicit request.~SNMPPacket() here. The automatic destructor at
+     * scope exit destroys `request` exactly once, AFTER response.serialiseInto().
+     * An earlier explicit call double-destroyed every pool-backed parse object
+     * (refcount hit 0 twice) and ASNPool::release() decremented usedCount twice
+     * per object — corrupting the pool counter until slots could be handed to
+     * two live objects. Symptom on ESP-01: degraded/short GetBulk responses
+     * under trap concurrency, with no exhaustion logs. */
+
     if(pass){
         for(int idx = 0; idx < outResponseCount; idx++){
             const VarBind& item = outResponseList[idx];
@@ -102,8 +120,26 @@ SNMP_ERROR_RESPONSE handlePacket(uint8_t* buffer, int packetLength, int* respons
 
     *responseLength = response.serialiseInto(buffer, max_packet_size);
     if(*responseLength <= 0){
-        SNMP_LOGD("Failed to build response packet");
-        return SNMP_FAILED_SERIALISATION;
+        /* v3.3.2: the response builder materializes before serializing, so a
+         * response can be fully built yet exceed the packet buffer (long OIDs,
+         * string values, big SET echoes).  Former behavior returned
+         * SNMP_FAILED_SERIALISATION with NO response — the manager waits out
+         * its full timeout on a request the agent actually processed.  RFC
+         * 3416 §4.2.x requires the agent to answer tooBig instead whenever it
+         * cannot return a well-formed response within its message-size limit.
+         * A tooBig error PDU is tiny (request OID echo only) and cannot itself
+         * overflow, so rebuilding into the same buffer is always safe. */
+        SNMP_LOGW("Response of %d varbind(s) exceeds packet budget (%d B): rebuilding as tooBig (RFC 3416).\n",
+                  response.size(), (int)max_packet_size);
+        SNMPResponse tooBigResponse(request);
+        tooBigResponse.setGlobalError(TOO_BIG, 0, true);
+        memset(buffer, 0, max_packet_size);
+        *responseLength = tooBigResponse.serialiseInto(buffer, max_packet_size);
+        if(*responseLength <= 0){
+            SNMP_LOGE("tooBig rebuild also failed to serialise");
+            return SNMP_FAILED_SERIALISATION;
+        }
+        return SNMP_ERROR_PACKET_SENT;
     }
 
     return handleStatus;

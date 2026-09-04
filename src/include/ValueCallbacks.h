@@ -4,14 +4,25 @@
 #include "BER.h"
 #include <algorithm>
 
+template <typename T>
+static inline void vcb_pool_asn_deleter(T* p) noexcept {
+    asn_delete(static_cast<BER_CONTAINER*>(p));
+}
+
+template <typename T>
+static inline std::shared_ptr<T> vcb_pool_shared(T* p) noexcept {
+    if(!p) return nullptr;
+    return std::shared_ptr<T>(p, vcb_pool_asn_deleter<T>);
+}
+
 typedef int (*GETINT_FUNC)() ;
 typedef uint32_t (*GETUINT_FUNC)();
 typedef const char* (*GETSTRING_FUNC)();
 
 class ValueCallback {
   public:
-    ValueCallback(SortableOIDType* oid, ASN_TYPE type): OID(oid), type(type){};
-    ~ValueCallback(){
+    ValueCallback(SortableOIDType* oid, ASN_TYPE type): OID(oid), type(type){}
+    virtual ~ValueCallback(){
         asn_delete(OID);
     }
     SortableOIDType * const OID;
@@ -24,6 +35,9 @@ class ValueCallback {
     void resetSetOccurred(){
         setOccurred = false;
     }
+
+    static const char* getTypeName(ASN_TYPE t) noexcept;
+    virtual const char* getAccessTag() const noexcept { return isSettable ? "RW" : "RO"; }
 
     static ValueCallback* findCallback(ValueCallback* const *callbacks, int callbacksCount, const OIDType* const oid, bool walk, int startAt = 0, int *foundAt = nullptr);
     static std::shared_ptr<BER_CONTAINER> getValueForCallback(ValueCallback* callback);
@@ -40,7 +54,7 @@ bool remove_handler(ValueCallback** callbacks, int& callbacksCount, ValueCallbac
 
 class IntegerCallback: public ValueCallback {
   public:
-    IntegerCallback(SortableOIDType* oid, int* value): ValueCallback(oid, INTEGER), value(value) {};
+    IntegerCallback(SortableOIDType* oid, int* value): ValueCallback(oid, INTEGER), value(value) {}
 
   protected:
     int* const value;
@@ -52,13 +66,13 @@ class IntegerCallback: public ValueCallback {
 
 class StaticIntegerCallback: public ValueCallback {
   public:
-    StaticIntegerCallback(SortableOIDType* oid, int value): ValueCallback(oid, INTEGER), val(value) {};
+    StaticIntegerCallback(SortableOIDType* oid, int value): ValueCallback(oid, INTEGER), val(value) {}
 
   protected:
     const int val;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-        return std::make_shared<IntegerType>(val);
+        return vcb_pool_shared(asn_new<IntegerType>(val));
     }
 
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
@@ -69,13 +83,14 @@ class StaticIntegerCallback: public ValueCallback {
 class DynamicIntegerCallback: public ValueCallback {
 public:
     DynamicIntegerCallback(SortableOIDType* oid, GETINT_FUNC callback_func):
-        ValueCallback(oid, INTEGER), m_callback(callback_func) {};
+        ValueCallback(oid, INTEGER), m_callback(callback_func) {}
+    const char* getAccessTag() const noexcept override { return "DYN"; }
 
 protected:
     GETINT_FUNC m_callback;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-        return std::make_shared<IntegerType>(m_callback());
+        return vcb_pool_shared(asn_new<IntegerType>(m_callback()));
     }
 
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
@@ -85,7 +100,7 @@ protected:
 
 class TimestampCallback: public ValueCallback {
   public:
-    TimestampCallback(SortableOIDType* oid, uint32_t* value): ValueCallback(oid, TIMESTAMP), value(value) {};
+    TimestampCallback(SortableOIDType* oid, uint32_t* value): ValueCallback(oid, TIMESTAMP), value(value) {}
 
   protected:
     uint32_t* const value;
@@ -97,13 +112,14 @@ class TimestampCallback: public ValueCallback {
 class DynamicTimestampCallback: public ValueCallback {
 public:
     DynamicTimestampCallback(SortableOIDType* oid, GETUINT_FUNC callback_func):
-    ValueCallback(oid, TIMESTAMP), m_callback(callback_func) {};
+    ValueCallback(oid, TIMESTAMP), m_callback(callback_func) {}
+    const char* getAccessTag() const noexcept override { return "DYN"; }
 
 protected:
     GETUINT_FUNC m_callback;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-        return std::make_shared<TimestampType>(m_callback());
+        return vcb_pool_shared(asn_new<TimestampType>(m_callback()));
     }
 
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
@@ -118,7 +134,7 @@ public:
         if(len > SNMP_MAX_STRING_LEN) len = SNMP_MAX_STRING_LEN;
         memcpy(this->value, value, len);
         this->value[len] = 0;
-    };
+    }
 
 protected:
     char value[SNMP_MAX_STRING_LEN + 1];
@@ -126,27 +142,28 @@ protected:
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override;
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
         return NO_ACCESS;
-    };
+    }
 };
 
 class DynamicStringCallback: public ValueCallback {
 public:
-    DynamicStringCallback(SortableOIDType* oid, GETSTRING_FUNC callback): ValueCallback(oid, STRING), m_callback(callback) {};
+    DynamicStringCallback(SortableOIDType* oid, GETSTRING_FUNC callback): ValueCallback(oid, STRING), m_callback(callback) {}
+    const char* getAccessTag() const noexcept override { return "DYN"; }
 
 protected:
     GETSTRING_FUNC m_callback;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-      return std::make_shared<OctetType>(m_callback());
+      return vcb_pool_shared(asn_new<OctetType>(m_callback()));
     }
     SNMP_ERROR_STATUS setTypeWithValue(BER_CONTAINER*) override {
         return NO_ACCESS;
-    };
+    }
 };
 
 class StringCallback: public ValueCallback {
   public:
-    StringCallback(SortableOIDType* oid, char** value, size_t max_len): ValueCallback(oid, STRING), value(value), max_len(max_len) {};
+    StringCallback(SortableOIDType* oid, char** value, size_t max_len): ValueCallback(oid, STRING), value(value), max_len(max_len) {}
 
   protected:
     char** const value;
@@ -158,7 +175,7 @@ class StringCallback: public ValueCallback {
 
 class OpaqueCallback: public ValueCallback {
   public:
-    OpaqueCallback(SortableOIDType* oid, uint8_t* value, int data_len): ValueCallback(oid, OPAQUE), value(value), data_len(data_len) {};
+    OpaqueCallback(SortableOIDType* oid, uint8_t* value, int data_len): ValueCallback(oid, OPAQUE), value(value), data_len(data_len) {}
 
   protected:
     uint8_t* const value;
@@ -175,7 +192,7 @@ class OIDCallback: public ValueCallback {
         if(len > SNMP_MAX_OID_STR_LEN) len = SNMP_MAX_OID_STR_LEN;
         memcpy(this->value, value, len);
         this->value[len] = 0;
-    };
+    }
 
   protected:
     char value[SNMP_MAX_OID_STR_LEN + 1];
@@ -183,12 +200,12 @@ class OIDCallback: public ValueCallback {
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override;
     SNMP_ERROR_STATUS setTypeWithValue (BER_CONTAINER*) override{
         return NO_ACCESS;
-    };
+    }
 };
 
 class Counter32Callback: public ValueCallback {
   public:
-    Counter32Callback(SortableOIDType* oid, uint32_t* value): ValueCallback(oid, COUNTER32), value(value) {};
+    Counter32Callback(SortableOIDType* oid, uint32_t* value): ValueCallback(oid, COUNTER32), value(value) {}
 
   protected:
     uint32_t* const value;
@@ -200,7 +217,7 @@ class Counter32Callback: public ValueCallback {
 
 class Gauge32Callback: public ValueCallback {
   public:
-    Gauge32Callback(SortableOIDType* oid, uint32_t* value): ValueCallback(oid, GAUGE32), value(value) {};
+    Gauge32Callback(SortableOIDType* oid, uint32_t* value): ValueCallback(oid, GAUGE32), value(value) {}
 
   protected:
     uint32_t* const value;
@@ -211,22 +228,23 @@ class Gauge32Callback: public ValueCallback {
 
 class DynamicGauge32Callback: public ValueCallback {
   public:
-    DynamicGauge32Callback(SortableOIDType* oid, GETUINT_FUNC callback_func): ValueCallback(oid, GAUGE32), m_callback(callback_func) {};
+    DynamicGauge32Callback(SortableOIDType* oid, GETUINT_FUNC callback_func): ValueCallback(oid, GAUGE32), m_callback(callback_func) {}
+    const char* getAccessTag() const noexcept override { return "DYN"; }
 
   protected:
     GETUINT_FUNC m_callback;
 
     std::shared_ptr<BER_CONTAINER> buildTypeWithValue() override {
-        return std::make_shared<Gauge>(m_callback());
+        return vcb_pool_shared(asn_new<Gauge>(m_callback()));
     }
     SNMP_ERROR_STATUS setTypeWithValue (BER_CONTAINER*) override{
         return NO_ACCESS;
-    };
+    }
 };
 
 class Counter64Callback: public ValueCallback {
   public:
-    Counter64Callback(SortableOIDType* oid, uint64_t* value): ValueCallback(oid, COUNTER64), value(value) {};
+    Counter64Callback(SortableOIDType* oid, uint64_t* value): ValueCallback(oid, COUNTER64), value(value) {}
 
   protected:
     uint64_t* const value;
